@@ -11,18 +11,26 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "==> Bumping versions to $Version" -ForegroundColor Cyan
 
+# Helper: write text as UTF-8 without BOM (PowerShell 5.1 default adds BOM, which breaks JSON parsers).
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+function Save-Utf8NoBom([string]$Path, [string]$Content) {
+  $abs = (Resolve-Path -LiteralPath $Path).Path
+  [System.IO.File]::WriteAllText($abs, $Content, $utf8NoBom)
+}
+
 # package.json
 $pkg = Get-Content package.json -Raw | ConvertFrom-Json
 $pkg.version = $Version
-$pkg | ConvertTo-Json -Depth 10 | Set-Content package.json -Encoding utf8
+Save-Utf8NoBom 'package.json' (($pkg | ConvertTo-Json -Depth 10) + "`n")
 
 # tauri.conf.json
 $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
 $conf.version = $Version
-$conf | ConvertTo-Json -Depth 10 | Set-Content src-tauri/tauri.conf.json -Encoding utf8
+Save-Utf8NoBom 'src-tauri/tauri.conf.json' (($conf | ConvertTo-Json -Depth 10) + "`n")
 
 # Cargo.toml
-(Get-Content src-tauri/Cargo.toml) -replace '^version = ".*"', "version = `"$Version`"" | Set-Content src-tauri/Cargo.toml -Encoding utf8
+$cargo = (Get-Content src-tauri/Cargo.toml -Raw) -replace '(?m)^version = ".*"', "version = `"$Version`""
+Save-Utf8NoBom 'src-tauri/Cargo.toml' $cargo
 
 Write-Host "==> Loading signing key" -ForegroundColor Cyan
 $keyPath = "$env:USERPROFILE\.tauri\stealth-chat.key"
@@ -53,13 +61,20 @@ if (-not (Test-Path $exe)) {
 }
 
 Write-Host "==> Patching latest.json with GitHub release URL" -ForegroundColor Cyan
-if (Test-Path $json) {
-  $manifest = Get-Content $json -Raw | ConvertFrom-Json
-  $manifest.platforms.'windows-x86_64'.url = "https://github.com/$GitHubUser/stealth-chat/releases/download/v$Version/stealth-chat_${Version}_x64-setup.exe"
-  $manifest | ConvertTo-Json -Depth 10 | Set-Content $json -Encoding utf8
-} else {
-  Write-Host "Warning: $json not found. createUpdaterArtifacts may not be enabled." -ForegroundColor Yellow
+# Build latest.json from the .exe.sig produced by tauri (createUpdaterArtifacts only writes the .sig).
+$sigContent = (Get-Content $sig -Raw).Trim()
+$manifest = [ordered]@{
+  version  = $Version
+  notes    = "Auto-generated release v$Version"
+  pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+  platforms = [ordered]@{
+    'windows-x86_64' = [ordered]@{
+      signature = $sigContent
+      url       = "https://github.com/$GitHubUser/stealth-chat/releases/download/v$Version/stealth-chat_${Version}_x64-setup.exe"
+    }
+  }
 }
+Save-Utf8NoBom $json ($manifest | ConvertTo-Json -Depth 10)
 
 Write-Host ""
 Write-Host "==> Done. Artifacts:" -ForegroundColor Green
