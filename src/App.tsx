@@ -23,12 +23,14 @@ type Room = {
   id: string;
   kind: RoomKind;
   name: string;
-  hostPeerId: string;          // who created the room
+  hostPeerId: string;
   isHost: boolean;
-  memberPeerIds: string[];     // ids of OTHER members (not including me)
-  memberNames: Record<string, string>;  // peerId -> display name
+  memberPeerIds: string[];
+  memberNames: Record<string, string>;
   mineColor: string;
   theirsColor: string;
+  mineOpacity?: number;        // 0..1, defaults to 1
+  theirsOpacity?: number;
   messages: Msg[];
 };
 
@@ -113,6 +115,11 @@ export default function App() {
   const [nameSetupOpen, setNameSetupOpen] = useState<boolean>(() => !loadSettings().myName);
   const [isSharing, setIsSharing] = useState(false);
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
+  const [splitRatio, setSplitRatio] = useState<number>(() => {
+    const v = parseFloat(localStorage.getItem("sc.splitRatio") ?? "");
+    return Number.isFinite(v) && v >= 0.25 && v <= 0.9 ? v : 0.65;
+  });
+  const [draggingSplit, setDraggingSplit] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body?: string } | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total?: number } | null>(null);
@@ -145,6 +152,8 @@ export default function App() {
     if (activeRoom) {
       root.style.setProperty("--mine", activeRoom.mineColor);
       root.style.setProperty("--theirs", activeRoom.theirsColor);
+      root.style.setProperty("--mine-opacity", String(activeRoom.mineOpacity ?? 1));
+      root.style.setProperty("--theirs-opacity", String(activeRoom.theirsOpacity ?? 1));
     }
   }, [settings, activeRoom]);
 
@@ -171,6 +180,30 @@ export default function App() {
       unlistenC.then((u) => u());
     };
   }, []);
+
+  // Split-view divider drag
+  useEffect(() => {
+    if (!draggingSplit) return;
+    function onMove(e: MouseEvent) {
+      const r = e.clientX / window.innerWidth;
+      const clamped = Math.max(0.25, Math.min(0.9, r));
+      setSplitRatio(clamped);
+    }
+    function onUp() {
+      setDraggingSplit(false);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [draggingSplit]);
+
+  // Persist split ratio
+  useEffect(() => {
+    localStorage.setItem("sc.splitRatio", String(splitRatio));
+  }, [splitRatio]);
 
   // Check for updates on startup
   useEffect(() => {
@@ -406,6 +439,31 @@ export default function App() {
     inputRef.current?.focus();
   }
 
+  function sendImageDataUrl(dataUrl: string) {
+    if (!activeRoom || !peerRef.current) return;
+    const msgId = uid();
+    const ts = Date.now();
+    updateRoom(activeRoom.id, (r) => ({
+      ...r,
+      messages: [...r.messages, { id: msgId, author: "me", imageDataUrl: dataUrl, ts }],
+    }));
+    const wire: WireMsg = {
+      type: "image",
+      msgId,
+      from: peerRef.current.myId,
+      fromName: settings.myName,
+      imageDataUrl: dataUrl,
+      ts,
+      toGroup: activeRoom.kind === "group" ? activeRoom.id : undefined,
+    };
+    if (activeRoom.kind === "dm") {
+      const target = activeRoom.memberPeerIds[0];
+      if (target) peerRef.current.send(target, wire);
+    } else {
+      for (const pid of activeRoom.memberPeerIds) peerRef.current.send(pid, wire);
+    }
+  }
+
   async function attachImage() {
     if (!activeRoom || !peerRef.current) return;
     try {
@@ -418,34 +476,31 @@ export default function App() {
       const ext = path.split(".").pop()?.toLowerCase() ?? "png";
       const mime = ext === "jpg" ? "jpeg" : ext;
       const b64 = btoa(String.fromCharCode(...new Uint8Array(bytes)));
-      const dataUrl = `data:image/${mime};base64,${b64}`;
-
-      const msgId = uid();
-      const ts = Date.now();
-      updateRoom(activeRoom.id, (r) => ({
-        ...r,
-        messages: [...r.messages, { id: msgId, author: "me", imageDataUrl: dataUrl, ts }],
-      }));
-
-      const wire: WireMsg = {
-        type: "image",
-        msgId,
-        from: peerRef.current.myId,
-        fromName: settings.myName,
-        imageDataUrl: dataUrl,
-        ts,
-        toGroup: activeRoom.kind === "group" ? activeRoom.id : undefined,
-      };
-
-      if (activeRoom.kind === "dm") {
-        const target = activeRoom.memberPeerIds[0];
-        if (target) peerRef.current.send(target, wire);
-      } else {
-        for (const pid of activeRoom.memberPeerIds) peerRef.current.send(pid, wire);
-      }
+      sendImageDataUrl(`data:image/${mime};base64,${b64}`);
     } catch (e) {
       console.error(e);
       showToast("No se pudo enviar la imagen");
+    }
+  }
+
+  function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    if (!activeRoom || !peerRef.current) return;
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.startsWith("image/")) {
+        const blob = item.getAsFile();
+        if (!blob) continue;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result as string;
+          if (dataUrl) sendImageDataUrl(dataUrl);
+        };
+        reader.readAsDataURL(blob);
+        e.preventDefault();
+        return;
+      }
     }
   }
 
@@ -656,44 +711,67 @@ export default function App() {
         </div>
       ) : activeRoom ? (
         <>
-          <div className="chat" ref={scrollRef}>
-            {/* Active remote screen-shares from members of this room */}
-            {[...remoteStreams.entries()]
-              .filter(([pid]) => activeRoom.memberPeerIds.includes(pid))
-              .map(([pid, stream]) => (
-                <RemoteVideo
-                  key={pid}
-                  stream={stream}
-                  label={activeRoom.memberNames[pid] ?? pid.slice(0, 8)}
-                />
-              ))}
-            {activeRoom.messages.length === 0 && (
-              <div className="empty-hint">
-                Sin mensajes en <b>{activeRoom.name}</b>.
-                {activeRoom.kind === "group" && (
-                  <div className="members">
-                    Miembros: {Object.values(activeRoom.memberNames).join(", ") || "(esperando)"}
+          {(() => {
+            const roomStreams = [...remoteStreams.entries()].filter(([pid]) =>
+              activeRoom.memberPeerIds.includes(pid),
+            );
+            const hasVideo = roomStreams.length > 0;
+            const messagesPane = (
+              <div className="chat" ref={scrollRef}>
+                {activeRoom.messages.length === 0 && (
+                  <div className="empty-hint">
+                    Sin mensajes en <b>{activeRoom.name}</b>.
+                    {activeRoom.kind === "group" && (
+                      <div className="members">
+                        Miembros: {Object.values(activeRoom.memberNames).join(", ") || "(esperando)"}
+                      </div>
+                    )}
+                    <div className="invite-block">
+                      Tu código: <code>{myPeerId}</code>
+                      <button className="linkbtn" onClick={copyMyId}>copiar</button>
+                    </div>
                   </div>
                 )}
-                <div className="invite-block">
-                  Tu código: <code>{myPeerId}</code>
-                  <button className="linkbtn" onClick={copyMyId}>copiar</button>
+                {activeRoom.messages.map((m) => (
+                  <div key={m.id} className={`msg ${m.author === "me" ? "mine" : "theirs"}`}>
+                    {m.author !== "me" && activeRoom.kind === "group" && (
+                      <span className="msg-author">{m.authorName ?? activeRoom.memberNames[m.author as string] ?? "?"}</span>
+                    )}
+                    {m.text && <span className="msg-text">{m.text}</span>}
+                    {m.imageDataUrl && <img className="msg-img" src={m.imageDataUrl} alt="imagen" />}
+                    <span className="msg-time">
+                      {new Date(m.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            );
+
+            if (!hasVideo) return messagesPane;
+
+            return (
+              <div
+                className="split-content"
+                style={{ ["--split-left" as any]: `${splitRatio * 100}%` }}
+              >
+                <div className="video-panel">
+                  {roomStreams.map(([pid, stream]) => (
+                    <RemoteVideo
+                      key={pid}
+                      stream={stream}
+                      label={activeRoom.memberNames[pid] ?? pid.slice(0, 8)}
+                    />
+                  ))}
                 </div>
+                <div
+                  className={`split-divider ${draggingSplit ? "dragging" : ""}`}
+                  onMouseDown={() => setDraggingSplit(true)}
+                  title="Arrastra para ajustar"
+                />
+                <div className="chat-panel">{messagesPane}</div>
               </div>
-            )}
-            {activeRoom.messages.map((m) => (
-              <div key={m.id} className={`msg ${m.author === "me" ? "mine" : "theirs"}`}>
-                {m.author !== "me" && activeRoom.kind === "group" && (
-                  <span className="msg-author">{m.authorName ?? activeRoom.memberNames[m.author as string] ?? "?"}</span>
-                )}
-                {m.text && <span className="msg-text">{m.text}</span>}
-                {m.imageDataUrl && <img className="msg-img" src={m.imageDataUrl} alt="imagen" />}
-                <span className="msg-time">
-                  {new Date(m.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                </span>
-              </div>
-            ))}
-          </div>
+            );
+          })()}
 
           <footer className="composer">
             <button className="iconbtn" onClick={attachImage} title="Adjuntar imagen" disabled={!peerReady}>🖼</button>
@@ -708,9 +786,10 @@ export default function App() {
             <textarea
               ref={inputRef}
               className="input"
-              placeholder={peerReady ? "Mensaje…" : "Conectando…"}
+              placeholder={peerReady ? "Mensaje (Ctrl+V pega imagen)…" : "Conectando…"}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
+              onPaste={handlePaste}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendText(); }
               }}
@@ -756,8 +835,8 @@ export default function App() {
           <hr />
           <div className="section-title">Apariencia</div>
           <label className="row">
-            <span>Transparencia</span>
-            <input type="range" min={0.2} max={1} step={0.01} value={settings.opacity}
+            <span title="0% = ventana totalmente invisible (sigue clickeable)">Opacidad app</span>
+            <input type="range" min={0} max={1} step={0.01} value={settings.opacity}
               onChange={(e) => setSettings((s) => ({ ...s, opacity: parseFloat(e.target.value) }))} />
             <span className="row-val">{Math.round(settings.opacity * 100)}%</span>
           </label>
@@ -781,20 +860,34 @@ export default function App() {
           {activeRoom && (
             <>
               <hr />
-              <div className="section-title">Colores de "{activeRoom.name}"</div>
+              <div className="section-title">Burbujas de "{activeRoom.name}"</div>
               <label className="row">
-                <span>Mis burbujas</span>
+                <span>Mis: color</span>
                 <input type="color" value={activeRoom.mineColor}
                   onChange={(e) => updateRoom(activeRoom.id, (r) => ({ ...r, mineColor: e.target.value }))} />
               </label>
               <label className="row">
-                <span>Burbujas de otros</span>
+                <span>Mis: opacidad</span>
+                <input type="range" min={0} max={1} step={0.01}
+                  value={activeRoom.mineOpacity ?? 1}
+                  onChange={(e) => updateRoom(activeRoom.id, (r) => ({ ...r, mineOpacity: parseFloat(e.target.value) }))} />
+                <span className="row-val">{Math.round((activeRoom.mineOpacity ?? 1) * 100)}%</span>
+              </label>
+              <label className="row">
+                <span>Otros: color</span>
                 <input type="color" value={activeRoom.theirsColor}
                   onChange={(e) => updateRoom(activeRoom.id, (r) => ({ ...r, theirsColor: e.target.value }))} />
               </label>
+              <label className="row">
+                <span>Otros: opacidad</span>
+                <input type="range" min={0} max={1} step={0.01}
+                  value={activeRoom.theirsOpacity ?? 1}
+                  onChange={(e) => updateRoom(activeRoom.id, (r) => ({ ...r, theirsOpacity: parseFloat(e.target.value) }))} />
+                <span className="row-val">{Math.round((activeRoom.theirsOpacity ?? 1) * 100)}%</span>
+              </label>
               <button className="linkbtn"
-                onClick={() => updateRoom(activeRoom.id, (r) => ({ ...r, mineColor: DEFAULT_MINE, theirsColor: DEFAULT_THEIRS }))}>
-                restablecer colores
+                onClick={() => updateRoom(activeRoom.id, (r) => ({ ...r, mineColor: DEFAULT_MINE, theirsColor: DEFAULT_THEIRS, mineOpacity: 1, theirsOpacity: 1 }))}>
+                restablecer
               </button>
             </>
           )}
@@ -881,16 +974,18 @@ export default function App() {
 
 function RemoteVideo({ stream, label }: { stream: MediaStream; label: string }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [expanded, setExpanded] = useState(false);
   useEffect(() => {
     if (videoRef.current) {
       videoRef.current.srcObject = stream;
     }
   }, [stream]);
+  function fullscreen() {
+    videoRef.current?.requestFullscreen().catch(() => {});
+  }
   return (
-    <div className={`remote-video ${expanded ? "expanded" : ""}`} onClick={() => setExpanded((e) => !e)}>
+    <div className="remote-video" onDoubleClick={fullscreen} title="Doble click para pantalla completa">
       <video ref={videoRef} autoPlay playsInline muted />
-      <div className="remote-video-label">{label} {expanded ? "(click para minimizar)" : "(click para expandir)"}</div>
+      <div className="remote-video-label">{label}</div>
     </div>
   );
 }

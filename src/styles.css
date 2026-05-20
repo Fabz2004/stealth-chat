@@ -196,8 +196,16 @@ input, textarea {
   line-height: 1.35;
 }
 
-.msg.mine { background: var(--mine); align-self: flex-end; border-bottom-right-radius: 3px; }
-.msg.theirs { background: var(--theirs); align-self: flex-start; border-bottom-left-radius: 3px; }
+.msg.mine {
+  background: color-mix(in srgb, var(--mine) calc(var(--mine-opacity, 1) * 100%), transparent);
+  align-self: flex-end;
+  border-bottom-right-radius: 3px;
+}
+.msg.theirs {
+  background: color-mix(in srgb, var(--theirs) calc(var(--theirs-opacity, 1) * 100%), transparent);
+  align-self: flex-start;
+  border-bottom-left-radius: 3px;
+}
 
 .msg-author {
   font-size: 10px;
@@ -243,24 +251,65 @@ input, textarea {
 .iconbtn.sharing { background: #d9534f; border-color: #d9534f; color: white; }
 .iconbtn.sharing:hover { filter: brightness(1.1); }
 
-/* ===== Remote video (screen share) ===== */
+/* ===== Split layout when remote screen share is active ===== */
+.split-content {
+  display: grid;
+  grid-template-columns: var(--split-left, 65%) 6px 1fr;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.video-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #000;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chat-panel .chat { height: 100%; }
+
+.split-divider {
+  background: var(--border);
+  cursor: col-resize;
+  transition: background 0.1s;
+  position: relative;
+}
+.split-divider::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 24px;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 1px;
+}
+.split-divider:hover { background: var(--accent); }
+.split-divider.dragging { background: var(--accent); }
+
 .remote-video {
   position: relative;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-  cursor: pointer;
   background: #000;
-  margin-bottom: 6px;
-  transition: max-width 0.2s ease, max-height 0.2s ease;
-  max-height: 120px;
-  align-self: stretch;
+  flex: 1;
+  min-height: 0;
+  cursor: zoom-in;
+  overflow: hidden;
 }
-.remote-video.expanded { max-height: 60vh; }
 .remote-video video {
   width: 100%;
   height: 100%;
-  max-height: inherit;
   display: block;
   object-fit: contain;
   background: #000;
@@ -274,6 +323,7 @@ input, textarea {
   padding: 2px 6px;
   border-radius: 4px;
   pointer-events: none;
+  color: white;
 }
 
 .input {

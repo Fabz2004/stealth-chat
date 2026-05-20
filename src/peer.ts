@@ -164,12 +164,12 @@ export class PeerManager {
   async startScreenShare(peerIds: string[]): Promise<MediaStream> {
     if (this.localShareStream) throw new Error("Ya estás compartiendo");
     const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: 15 } as MediaTrackConstraints,
+      // Let the browser pick native resolution; cap frameRate at 60 (will pick whatever your monitor supports).
+      video: { frameRate: { ideal: 60, max: 60 } } as MediaTrackConstraints,
       audio: false,
     });
     this.localShareStream = stream;
 
-    // When user clicks Windows' "Stop sharing" button the track ends → cascade stop.
     const videoTrack = stream.getVideoTracks()[0];
     if (videoTrack) {
       videoTrack.addEventListener("ended", () => this.stopScreenShare());
@@ -179,6 +179,9 @@ export class PeerManager {
       try {
         const call = this.peer.call(peerId, stream);
         this.outgoingCalls.set(peerId, call);
+        // Bump the encoder bitrate ceiling so the receiver gets a sharp image
+        // (default ~1-2 Mbps; we want 6 Mbps for clear HD screen share).
+        this.boostCallBitrate(call);
         call.on("close", () => this.outgoingCalls.delete(peerId));
         call.on("error", (e) => {
           console.error("[peer] outgoing call error", e);
@@ -190,6 +193,31 @@ export class PeerManager {
     }
 
     return stream;
+  }
+
+  private boostCallBitrate(call: MediaConnection) {
+    // Give the underlying RTCPeerConnection a moment to finish negotiation.
+    const attempt = () => {
+      try {
+        const pc = (call as unknown as { peerConnection?: RTCPeerConnection }).peerConnection;
+        if (!pc) return false;
+        const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+        if (!sender) return false;
+        const params = sender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) {
+          params.encodings = [{}];
+        }
+        params.encodings[0].maxBitrate = 6_000_000;
+        params.encodings[0].maxFramerate = 60;
+        sender.setParameters(params).catch((e) => console.warn("[peer] setParameters", e));
+        return true;
+      } catch (e) {
+        console.warn("[peer] boostCallBitrate failed", e);
+        return false;
+      }
+    };
+    // Try a few times in case the senders aren't ready immediately
+    setTimeout(() => attempt() || setTimeout(() => attempt() || setTimeout(attempt, 2000), 1000), 500);
   }
 
   stopScreenShare() {
