@@ -46,6 +46,7 @@ type AppSettings = {
   alwaysOnTop: boolean;
   clickThrough: boolean;
   skipTaskbar: boolean;
+  notifSound: boolean;
 };
 
 const DEFAULT_MINE = "#3a3d4a";
@@ -61,7 +62,35 @@ const DEFAULT_SETTINGS: AppSettings = {
   alwaysOnTop: true,
   clickThrough: false,
   skipTaskbar: true,
+  notifSound: true,
 };
+
+// Subtle generated chime — no asset needed. Two short pure tones, total ~280ms.
+function playNotifSound() {
+  try {
+    const AC = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    const now = ctx.currentTime;
+    const beep = (start: number, freq: number, dur: number, peak = 0.08) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      osc.connect(gain).connect(ctx.destination);
+      gain.gain.setValueAtTime(0, start);
+      gain.gain.linearRampToValueAtTime(peak, start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+      osc.start(start);
+      osc.stop(start + dur + 0.02);
+    };
+    beep(now, 880, 0.12);
+    beep(now + 0.13, 1175, 0.16);
+    setTimeout(() => ctx.close().catch(() => {}), 500);
+  } catch (e) {
+    console.warn("[notif] sound failed", e);
+  }
+}
 
 const LS_ROOMS = "sc.rooms";
 const LS_SETTINGS = "sc.settings";
@@ -123,6 +152,12 @@ export default function App() {
   const [draggingSplit, setDraggingSplit] = useState(false);
   // Map of peerId -> display name for peers who connected but we don't know yet.
   const [incomingRequests, setIncomingRequests] = useState<Map<string, string>>(new Map());
+  // Peers whose screen share we've dismissed locally (we just hide it; the sender keeps sharing).
+  const [hiddenStreamPeerIds, setHiddenStreamPeerIds] = useState<Set<string>>(new Set());
+  // Which remote stream is currently in immersive (overlay) mode — takes over the entire window.
+  const [immersivePeerId, setImmersivePeerId] = useState<string | null>(null);
+  // Whether the floating chat mini-panel is visible while in immersive mode.
+  const [immersiveChatOpen, setImmersiveChatOpen] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body?: string } | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total?: number } | null>(null);
@@ -174,6 +209,8 @@ export default function App() {
   }, [activeRoom?.messages.length, activeId]);
 
   const [focused, setFocused] = useState(true);
+  const focusedRef = useRef(true);
+  useEffect(() => { focusedRef.current = focused; }, [focused]);
   useEffect(() => {
     const unlistenF = listen<boolean>("window-focus", (e) => setFocused(e.payload));
     const unlistenC = listen("click-through-disabled", () => {
@@ -185,6 +222,35 @@ export default function App() {
       unlistenC.then((u) => u());
     };
   }, []);
+
+  // Keyboard shortcuts for immersive mode:
+  // - Ctrl+Shift+M  → toggle immersive on the first remote stream in the active room
+  // - Escape        → exit immersive
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && immersivePeerId) {
+        e.preventDefault();
+        setImmersivePeerId(null);
+        return;
+      }
+      if (e.ctrlKey && e.shiftKey && (e.key === "m" || e.key === "M")) {
+        e.preventDefault();
+        if (immersivePeerId) {
+          setImmersivePeerId(null);
+          return;
+        }
+        // Pick the first visible remote stream from the active room
+        const room = roomsRef.current.find((r) => r.id === activeId);
+        if (!room) return;
+        const candidate = room.memberPeerIds.find(
+          (pid) => remoteStreams.has(pid) && !hiddenStreamPeerIds.has(pid),
+        );
+        if (candidate) setImmersivePeerId(candidate);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [immersivePeerId, activeId, remoteStreams, hiddenStreamPeerIds]);
 
   // Split-view divider drag
   useEffect(() => {
@@ -382,6 +448,11 @@ export default function App() {
         if (msg.toGroup && targetRoom.isHost) {
           peerRef.current?.broadcast(msg, fromPeerId);
         }
+
+        // Subtle notification if the window isn't focused (hidden, minimized, in background).
+        if (!focusedRef.current && settingsRef.current.notifSound) {
+          playNotifSound();
+        }
       }
     };
 
@@ -426,6 +497,13 @@ export default function App() {
           next.set(fromPeerId, stream);
           return next;
         });
+        // If the sender starts a fresh share, un-hide them so we see it.
+        setHiddenStreamPeerIds((s) => {
+          if (!s.has(fromPeerId)) return s;
+          const next = new Set(s);
+          next.delete(fromPeerId);
+          return next;
+        });
         showToast("Compartiendo pantalla contigo");
       },
       onRemoteStreamEnded: (fromPeerId) => {
@@ -434,6 +512,7 @@ export default function App() {
           next.delete(fromPeerId);
           return next;
         });
+        setImmersivePeerId((p) => (p === fromPeerId ? null : p));
       },
     });
 
@@ -738,7 +817,7 @@ export default function App() {
 
   // ===== Render =====
   return (
-    <div className={`app ${focused ? "focused" : "blurred"}`}>
+    <div className={`app ${focused ? "focused" : "blurred"} ${immersivePeerId ? "immersive-mode" : ""}`}>
       <header className="topbar" data-tauri-drag-region>
         <div className="tabs">
           {rooms.map((r) => {
@@ -813,7 +892,7 @@ export default function App() {
       ) : showWelcome ? (
         <div className="welcome">
           <div className="welcome-card">
-            <div className="welcome-title">stealth-chat</div>
+            <div className="welcome-title">Chati</div>
             <div className="welcome-sub">Hola <b>{settings.myName}</b>.</div>
             <div className="mycode">
               <span className="mycode-label">Tu código:</span>
@@ -832,8 +911,8 @@ export default function App() {
       ) : activeRoom ? (
         <>
           {(() => {
-            const roomStreams = [...remoteStreams.entries()].filter(([pid]) =>
-              activeRoom.memberPeerIds.includes(pid),
+            const roomStreams = [...remoteStreams.entries()].filter(
+              ([pid]) => activeRoom.memberPeerIds.includes(pid) && !hiddenStreamPeerIds.has(pid),
             );
             const hasVideo = roomStreams.length > 0;
             const messagesPane = (
@@ -880,6 +959,17 @@ export default function App() {
                       key={pid}
                       stream={stream}
                       label={activeRoom.memberNames[pid] ?? pid.slice(0, 8)}
+                      onClose={() => {
+                        setHiddenStreamPeerIds((s) => {
+                          const next = new Set(s);
+                          next.add(pid);
+                          return next;
+                        });
+                        showToast("Comparti ocultada (vuelve si comparten de nuevo)");
+                      }}
+                      onToggleImmersive={() =>
+                        setImmersivePeerId((cur) => (cur === pid ? null : pid))
+                      }
                     />
                   ))}
                 </div>
@@ -1009,6 +1099,16 @@ export default function App() {
                 onClick={() => updateRoom(activeRoom.id, (r) => ({ ...r, mineColor: DEFAULT_MINE, theirsColor: DEFAULT_THEIRS, mineOpacity: 1, theirsOpacity: 1 }))}>
                 restablecer
               </button>
+
+              <hr />
+              <div className="section-title">Gestión del chat</div>
+              <button
+                className="danger-btn"
+                onClick={() => removeRoom(activeRoom.id)}
+                title="Elimina este chat / contacto de la lista"
+              >
+                🗑 Eliminar este chat
+              </button>
             </>
           )}
 
@@ -1028,6 +1128,16 @@ export default function App() {
             <span>Ocultar de barra de tareas</span>
             <input type="checkbox" checked={settings.skipTaskbar}
               onChange={(e) => setSettings((s) => ({ ...s, skipTaskbar: e.target.checked }))} />
+          </label>
+          <label className="row toggle">
+            <span title="Beep suave cuando llega mensaje y la ventana no está enfocada">
+              Sonido al recibir mensaje
+            </span>
+            <input
+              type="checkbox"
+              checked={settings.notifSound}
+              onChange={(e) => setSettings((s) => ({ ...s, notifSound: e.target.checked }))}
+            />
           </label>
           <label className="row toggle">
             <span title="Cuidado: con esto activado no podrás clickear nada hasta que lo apagues con Ctrl+Shift+H">
@@ -1090,6 +1200,74 @@ export default function App() {
         <JoinModal onClose={() => setJoinOpen(false)} onJoin={joinByCode} />
       )}
 
+      {immersivePeerId && remoteStreams.has(immersivePeerId) && !hiddenStreamPeerIds.has(immersivePeerId) && (
+        <div className="immersive-overlay">
+          <VideoStream stream={remoteStreams.get(immersivePeerId)!} />
+
+          {/* Floating "exit" + label, dimmed by default, opaque on hover */}
+          <div className="immersive-hud" onMouseDown={(e) => e.stopPropagation()}>
+            <span>
+              {activeRoom?.memberNames[immersivePeerId] ??
+                rooms.find((r) => r.memberPeerIds.includes(immersivePeerId))?.memberNames[immersivePeerId] ??
+                immersivePeerId.slice(0, 8)}
+            </span>
+            <button
+              className="rv-btn"
+              onClick={() => { setImmersivePeerId(null); setImmersiveChatOpen(false); }}
+              title="Salir del modo inmersivo (Esc)"
+            >✕ salir</button>
+          </div>
+
+          {/* Floating chat toggle bottom-right */}
+          <button
+            className={`immersive-chat-btn ${immersiveChatOpen ? "open" : ""}`}
+            onClick={() => setImmersiveChatOpen((v) => !v)}
+            title={immersiveChatOpen ? "Cerrar mini chat" : "Abrir mini chat para escribir"}
+          >
+            {immersiveChatOpen ? "▾" : "💬"}
+          </button>
+
+          {/* Floating mini chat with composer */}
+          {immersiveChatOpen && activeRoom && (
+            <div className="floating-chat" onMouseDown={(e) => e.stopPropagation()}>
+              <div className="fc-header">
+                <span>{activeRoom.name}</span>
+              </div>
+              <div className="fc-messages">
+                {activeRoom.messages.length === 0 && (
+                  <div className="fc-empty">Aún sin mensajes</div>
+                )}
+                {activeRoom.messages.slice(-8).map((m) => (
+                  <div key={m.id} className={`msg ${m.author === "me" ? "mine" : "theirs"}`}>
+                    {m.author !== "me" && activeRoom.kind === "group" && (
+                      <span className="msg-author">{m.authorName ?? activeRoom.memberNames[m.author as string] ?? "?"}</span>
+                    )}
+                    {m.text && <span className="msg-text">{m.text}</span>}
+                    {m.imageDataUrl && <img className="msg-img" src={m.imageDataUrl} alt="imagen" />}
+                  </div>
+                ))}
+              </div>
+              <div className="fc-composer">
+                <button className="iconbtn" onClick={attachImage} title="Adjuntar imagen" disabled={!peerReady}>🖼</button>
+                <textarea
+                  className="input"
+                  placeholder={peerReady ? "Mensaje…" : "Conectando…"}
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onPaste={handlePaste}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendText(); }
+                  }}
+                  rows={1}
+                  disabled={!peerReady}
+                />
+                <button className="iconbtn send" onClick={sendText} disabled={!peerReady} title="Enviar (Enter)">↑</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {toast && <div className="toast">{toast}</div>}
 
       {updateAvailable && !updating && (
@@ -1116,22 +1294,132 @@ export default function App() {
   );
 }
 
-function RemoteVideo({ stream, label }: { stream: MediaStream; label: string }) {
+function RemoteVideo({
+  stream,
+  label,
+  onClose,
+  onToggleImmersive,
+}: {
+  stream: MediaStream;
+  label: string;
+  onClose?: () => void;
+  onToggleImmersive?: () => void;
+}) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const dragStart = useRef({ mx: 0, my: 0, ox: 0, oy: 0 });
+
   useEffect(() => {
     if (videoRef.current) {
       videoRef.current.srcObject = stream;
     }
   }, [stream]);
+
   function fullscreen() {
-    videoRef.current?.requestFullscreen().catch(() => {});
+    wrapRef.current?.requestFullscreen().catch(() => {});
   }
+
+  function reset() {
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+  }
+
+  function handleWheel(e: React.WheelEvent) {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+    setZoom((z) => {
+      const next = Math.max(1, Math.min(8, z * factor));
+      if (next === 1) setOffset({ x: 0, y: 0 });
+      return next;
+    });
+  }
+
+  function handleMouseDown(e: React.MouseEvent) {
+    if (zoom <= 1) return;
+    if (e.button !== 0) return;
+    e.preventDefault();
+    setDragging(true);
+    dragStart.current = { mx: e.clientX, my: e.clientY, ox: offset.x, oy: offset.y };
+  }
+
+  useEffect(() => {
+    if (!dragging) return;
+    function onMove(ev: MouseEvent) {
+      setOffset({
+        x: dragStart.current.ox + (ev.clientX - dragStart.current.mx),
+        y: dragStart.current.oy + (ev.clientY - dragStart.current.my),
+      });
+    }
+    function onUp() { setDragging(false); }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [dragging]);
+
+  const cursor = zoom > 1 ? (dragging ? "grabbing" : "grab") : "zoom-in";
+
   return (
-    <div className="remote-video" onDoubleClick={fullscreen} title="Doble click para pantalla completa">
-      <video ref={videoRef} autoPlay playsInline muted />
+    <div
+      ref={wrapRef}
+      className="remote-video"
+      onWheel={handleWheel}
+      onMouseDown={handleMouseDown}
+      onDoubleClick={fullscreen}
+      style={{ cursor }}
+      title="Ctrl+rueda: zoom · arrastra: mover · doble click: pantalla completa"
+    >
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        style={{
+          transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+          transformOrigin: "center center",
+          transition: dragging ? "none" : "transform 0.05s linear",
+        }}
+        draggable={false}
+      />
       <div className="remote-video-label">{label}</div>
+      <div className="remote-video-controls" onMouseDown={(e) => e.stopPropagation()}>
+        {onToggleImmersive && (
+          <button
+            className="rv-btn"
+            onClick={(e) => { e.stopPropagation(); onToggleImmersive(); }}
+            title="Modo inmersivo (Ctrl+Shift+M, Esc para salir)"
+          >⛶</button>
+        )}
+        {onClose && (
+          <button
+            className="rv-btn rv-close"
+            onClick={(e) => { e.stopPropagation(); onClose(); }}
+            title="Cerrar esta compartición"
+          >✕</button>
+        )}
+      </div>
+      {zoom > 1 && (
+        <button className="zoom-reset" onClick={(e) => { e.stopPropagation(); reset(); }}>
+          {Math.round(zoom * 100)}% · reset
+        </button>
+      )}
     </div>
   );
+}
+
+function VideoStream({ stream, className }: { stream: MediaStream; className?: string }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.srcObject = stream;
+  }, [stream]);
+  return <video ref={ref} autoPlay playsInline muted className={className} />;
 }
 
 function NameSetup({ onSubmit }: { onSubmit: (name: string) => void }) {

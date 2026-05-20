@@ -69,12 +69,18 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            // Register global hotkey Ctrl+Shift+H
+            // Register global hotkey Ctrl+Shift+H. Don't fail setup if another instance
+            // already holds it — just warn so the user can still use the app.
             let toggle = Shortcut::new(
                 Some(Modifiers::CONTROL | Modifiers::SHIFT),
                 Code::KeyH,
             );
-            app.global_shortcut().register(toggle)?;
+            if let Err(e) = app.global_shortcut().register(toggle) {
+                eprintln!(
+                    "[stealth-chat] Could not register Ctrl+Shift+H: {e}. \
+                     Probably another instance is already running."
+                );
+            }
 
             // Notify frontend on focus events so it can hint stealth status
             if let Some(window) = app.get_webview_window("main") {

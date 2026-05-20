@@ -336,6 +336,193 @@ input, textarea {
   color: white;
 }
 
+.zoom-reset {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: rgba(0, 0, 0, 0.65);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 10px;
+  cursor: pointer;
+  font-family: monospace;
+}
+.zoom-reset:hover { background: rgba(0, 0, 0, 0.85); }
+
+.remote-video-controls {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 4px;
+  opacity: 0.65;
+  transition: opacity 0.15s;
+}
+.remote-video:hover .remote-video-controls { opacity: 1; }
+
+.rv-btn {
+  background: rgba(0, 0, 0, 0.65);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1.2;
+  font: inherit;
+}
+.rv-btn:hover { background: rgba(0, 0, 0, 0.9); }
+.rv-close:hover { background: #c0392b; border-color: #c0392b; }
+
+/* When in immersive mode, kill all chrome so the shared screen looks like the user's own desktop. */
+.app.immersive-mode {
+  background: #000 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  backdrop-filter: none;
+}
+.app.immersive-mode > .topbar,
+.app.immersive-mode > .chat,
+.app.immersive-mode > .split-content,
+.app.immersive-mode > .welcome,
+.app.immersive-mode > .composer,
+.app.immersive-mode > .settings,
+.app.immersive-mode > .update-banner,
+.app.immersive-mode > .modal-backdrop {
+  display: none !important;
+}
+
+.immersive-overlay {
+  position: absolute;
+  inset: 0;
+  background: #000;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.immersive-overlay video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+.immersive-hud {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  color: white;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  opacity: 0.4;
+  transition: opacity 0.2s;
+  z-index: 2;
+}
+.immersive-overlay:hover .immersive-hud { opacity: 1; }
+
+.immersive-chat-btn {
+  position: absolute;
+  bottom: 14px;
+  right: 14px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  font-size: 18px;
+  cursor: pointer;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.55;
+  transition: opacity 0.2s, background 0.2s;
+}
+.immersive-chat-btn:hover { opacity: 1; background: rgba(0, 0, 0, 0.85); }
+.immersive-chat-btn.open { background: var(--accent); opacity: 1; border-color: var(--accent); }
+
+.floating-chat {
+  position: absolute;
+  bottom: 68px;
+  right: 14px;
+  width: 300px;
+  height: 380px;
+  background: color-mix(in srgb, var(--bg-tint) 88%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  backdrop-filter: blur(10px);
+  z-index: 3;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.fc-header {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.fc-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+.fc-empty { text-align: center; opacity: 0.5; font-size: 11px; padding: 16px 4px; }
+
+.fc-composer {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border-top: 1px solid var(--border);
+  align-items: center;
+}
+
+.fc-composer .input {
+  font-size: 12px;
+  min-height: 26px;
+  max-height: 60px;
+}
+
+.fc-composer .iconbtn {
+  width: 26px;
+  height: 26px;
+  font-size: 13px;
+}
+
+.danger-btn {
+  background: rgba(217, 83, 79, 0.12);
+  color: #ff8a86;
+  border: 1px solid rgba(217, 83, 79, 0.35);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  width: 100%;
+}
+.danger-btn:hover { background: rgba(217, 83, 79, 0.22); }
+
 .input {
   flex: 1;
   background: rgba(255, 255, 255, 0.04);
