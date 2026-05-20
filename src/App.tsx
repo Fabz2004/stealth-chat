@@ -486,6 +486,23 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
+  function forceReconnectAll() {
+    const pm = peerRef.current;
+    if (!pm) return;
+    pm.forceSignalingReconnect();
+    pm.clearInFlight();
+    let attempted = 0;
+    for (const r of roomsRef.current) {
+      for (const pid of r.memberPeerIds) {
+        if (!pm.isConnected(pid)) {
+          pm.connect(pid).catch(() => {});
+          attempted++;
+        }
+      }
+    }
+    showToast(`Reintentando ${attempted} conexion(es)…`);
+  }
+
   async function manualCheck() {
     setCheckStatus("checking");
     try {
@@ -1901,6 +1918,23 @@ export default function App() {
               }}
             />
           </label>
+
+          <hr />
+          <div className="section-title">Conexión</div>
+          <div className="row">
+            <span>Estado</span>
+            <span className="row-code">
+              {peerReady ? "🟢 conectado a PeerJS" : "⚪ conectando…"}
+            </span>
+          </div>
+          <button
+            className="danger-btn"
+            style={{ background: "rgba(74,140,255,0.12)", borderColor: "rgba(74,140,255,0.35)", color: "#9ec3ff" }}
+            onClick={forceReconnectAll}
+            disabled={!peerReady}
+          >
+            🔄 Reconectar a contactos
+          </button>
 
           <hr />
           <div className="section-title">Atajo global</div>

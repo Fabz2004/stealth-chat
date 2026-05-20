@@ -147,8 +147,14 @@ export class PeerManager {
       }
     });
 
-    this.peer.on("error", (err) => {
+    this.peer.on("error", (err: any) => {
       console.error("[peer] error", err);
+      // PeerJS errors that mention a specific peer (e.g. "Could not connect to peer X")
+      // include the id in err.message. Clear our in-flight flag for that id so
+      // the retry loop can try again later.
+      const msg = String(err?.message ?? err ?? "");
+      const m = msg.match(/peer ([A-Za-z0-9-]{8,})/);
+      if (m) this.inFlight.delete(m[1]);
       events.onError(err as Error);
     });
 
@@ -174,6 +180,11 @@ export class PeerManager {
       }
     }
     return true;
+  }
+
+  /** Drop all stale "in-flight" connect attempts so the next retry can try fresh. */
+  clearInFlight() {
+    this.inFlight.clear();
   }
 
   /** True if our connection to PeerJS Cloud is currently down. */
@@ -210,6 +221,15 @@ export class PeerManager {
     this.inFlight.add(peerId);
     const conn = this.peer.connect(peerId, { reliable: true });
     this.setupConnection(conn);
+    // Hard timeout: if the connection hasn't opened (no `open` event fired) in 10s,
+    // assume the remote peer is offline. Release the in-flight flag so the next
+    // retry tick can attempt again, otherwise we'd stay stuck "trying" forever.
+    setTimeout(() => {
+      if (this.inFlight.has(peerId) && !this.connections.has(peerId)) {
+        this.inFlight.delete(peerId);
+        try { conn.close(); } catch { /* ignore */ }
+      }
+    }, 10000);
   }
 
   private setupConnection(conn: DataConnection) {
