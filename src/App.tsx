@@ -281,6 +281,26 @@ export default function App() {
     const id = setInterval(() => setCallTick((t) => t + 1), 1000);
     return () => clearInterval(id);
   }, [callStartTs]);
+
+  // Typing indicators: which peers are currently typing in which rooms.
+  // Key = roomId+":"+peerId, value = expiry timestamp.
+  const [typingMap, setTypingMap] = useState<Map<string, number>>(new Map());
+  const lastTypingSentAt = useRef(0);
+  // Drop stale typing entries every second
+  useEffect(() => {
+    const id = setInterval(() => {
+      setTypingMap((m) => {
+        const now = Date.now();
+        let changed = false;
+        const next = new Map(m);
+        for (const [k, exp] of m) {
+          if (exp < now) { next.delete(k); changed = true; }
+        }
+        return changed ? next : m;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
   const [micMuted, setMicMuted] = useState(false);
   const [remoteVoiceStreams, setRemoteVoiceStreams] = useState<Map<string, MediaStream>>(new Map());
   // Incoming voice call awaiting accept/reject
@@ -554,6 +574,22 @@ export default function App() {
     emitTo("mascot", "mascot:opacity", settings.mascotOpacity ?? 1).catch(() => {});
   }, [settings.mascotOpacity, settings.mascotEnabled]);
 
+  // Mascot click → open the chat that triggered the last notification, bring window forward.
+  useEffect(() => {
+    const unlistenP = listen<{ roomId?: string }>("mascot:open-chat", async (e) => {
+      const roomId = e.payload?.roomId;
+      if (!roomId) return;
+      try {
+        const win = getCurrentWebviewWindow();
+        await win.unminimize();
+        await win.show();
+        await win.setFocus();
+      } catch { /* ignore */ }
+      setActiveId(roomId);
+    });
+    return () => { unlistenP.then((u) => u()); };
+  }, []);
+
   // Ask the OS for permission to show notifications when the app is hidden/minimized.
   // Tauri's notification plugin handles the native toast (bottom-right on Windows).
   useEffect(() => {
@@ -774,6 +810,21 @@ export default function App() {
         return;
       }
 
+      if (msg.type === "typing") {
+        // Pick the matching room (group or DM)
+        const roomMatch = msg.toGroup
+          ? roomsRef.current.find((r) => r.id === msg.toGroup)
+          : roomsRef.current.find((r) => r.kind === "dm" && r.memberPeerIds.includes(fromPeerId));
+        if (!roomMatch) return;
+        const key = `${roomMatch.id}:${fromPeerId}`;
+        setTypingMap((m) => {
+          const next = new Map(m);
+          next.set(key, Date.now() + 4000); // expires in 4s if no new event
+          return next;
+        });
+        return;
+      }
+
       if (msg.type === "music-open") {
         setMusicVideoId(msg.videoId);
         setMusicHostId(fromPeerId);
@@ -841,7 +892,7 @@ export default function App() {
         // fall back to the native OS toast otherwise.
         if (!focusedRef.current) {
           if (settingsRef.current.mascotEnabled) {
-            emitTo("mascot", "mascot:notify", { author: authorN, preview: previewT }).catch(() => {});
+            emitTo("mascot", "mascot:notify", { author: authorN, preview: previewT, roomId: targetRoom.id }).catch(() => {});
           } else if (notifPermissionRef.current) {
             try {
               sendNotification({ title: `Chati · ${authorN}`, body: previewT });
@@ -1209,6 +1260,26 @@ export default function App() {
   function handleComposerChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const value = e.target.value;
     setDraft(value);
+    // Broadcast a typing event at most once every 2.5s while user is editing.
+    if (activeRoom && peerRef.current && value.trim().length > 0) {
+      const now = Date.now();
+      if (now - lastTypingSentAt.current > 2500) {
+        lastTypingSentAt.current = now;
+        const wire: WireMsg = {
+          type: "typing",
+          from: peerRef.current.myId,
+          fromName: settings.myName,
+          ts: now,
+          toGroup: activeRoom.kind === "group" ? activeRoom.id : undefined,
+        };
+        if (activeRoom.kind === "dm") {
+          const target = activeRoom.memberPeerIds[0];
+          if (target) peerRef.current.send(target, wire);
+        } else {
+          for (const pid of activeRoom.memberPeerIds) peerRef.current.send(pid, wire);
+        }
+      }
+    }
     // Detect @ at caret to trigger mention autocomplete (groups only)
     if (activeRoom?.kind === "group") {
       const caret = e.target.selectionStart ?? value.length;
@@ -1877,24 +1948,6 @@ export default function App() {
         </div>
       ) : activeRoom ? (
         <>
-          {voiceActive && (() => {
-            // Pill showing who you're currently on a call with (in this room).
-            const peersInCall = activeRoom.memberPeerIds.filter(
-              (pid) => peerRef.current?.isConnected(pid),
-            );
-            const names = peersInCall.map((pid) => activeRoom.memberNames[pid] ?? pid.slice(0, 8));
-            return (
-              <div className="call-status">
-                <span className="call-status-dot" />
-                <span className="call-status-text">
-                  En llamada con <b>{names.join(", ") || "(esperando)"}</b>
-                  {cameraActive && " · cámara"}
-                  {micMuted && " · silenciado"}
-                </span>
-              </div>
-            );
-          })()}
-
           {(() => {
             const roomStreams = [...remoteStreams.entries()].filter(
               ([pid]) => activeRoom.memberPeerIds.includes(pid) && !hiddenStreamPeerIds.has(pid),
@@ -1995,6 +2048,28 @@ export default function App() {
                   title="Arrastra para ajustar"
                 />
                 <div className="chat-panel">{messagesPane}</div>
+              </div>
+            );
+          })()}
+
+          {(() => {
+            const typers: string[] = [];
+            for (const [key, exp] of typingMap) {
+              if (exp < Date.now()) continue;
+              const [roomId, peerId] = key.split(":");
+              if (roomId !== activeRoom.id) continue;
+              const name = activeRoom.memberNames[peerId] ?? peerId.slice(0, 8);
+              typers.push(name);
+            }
+            if (typers.length === 0) return null;
+            const text =
+              typers.length === 1
+                ? `${typers[0]} está escribiendo…`
+                : `${typers.slice(0, 2).join(", ")} están escribiendo…`;
+            return (
+              <div className="typing-indicator">
+                <span className="typing-dots"><span /><span /><span /></span>
+                <span>{text}</span>
               </div>
             );
           })()}

@@ -11,7 +11,8 @@ export type WireMsg =
   | { type: "music-state"; playing: boolean; positionSec: number; ts: number; toGroup?: string }
   | { type: "music-close"; toGroup?: string; ts: number }
   | { type: "ping"; ts: number }
-  | { type: "pong"; ts: number };
+  | { type: "pong"; ts: number }
+  | { type: "typing"; from: string; fromName: string; ts: number; toGroup?: string };
 
 export type IncomingVoiceCall = {
   peerId: string;

@@ -1472,6 +1472,16 @@ body.mascot-window #root {
   justify-content: flex-end;
   padding: 8px 4px 4px 4px;
   transition: opacity 0.2s ease;
+  cursor: pointer;
+}
+.mascot-root.peeking { justify-content: flex-end; padding-bottom: 0; }
+.mascot-root.active { justify-content: flex-end; padding: 8px 4px 4px 4px; }
+.mascot-root.active .mascot-body { animation: mascot-popout 0.4s ease-out; }
+
+@keyframes mascot-popout {
+  0%   { transform: translateY(20px) scale(0.6); opacity: 0; }
+  60%  { transform: translateY(-6px) scale(1.05); opacity: 1; }
+  100% { transform: translateY(0) scale(1); }
 }
 
 .speech-bubble {
@@ -1533,6 +1543,35 @@ body.mascot-window #root {
   40%  { transform: translateY(-4px) rotate(4deg); }
   60%  { transform: translateY(-6px) rotate(-3deg); }
   100% { transform: translateY(0) rotate(0deg); }
+}
+
+/* ===== Typing indicator ===== */
+.typing-indicator {
+  font-size: 11px;
+  padding: 3px 12px 6px 12px;
+  opacity: 0.7;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-style: italic;
+}
+.typing-dots {
+  display: inline-flex;
+  gap: 2px;
+}
+.typing-dots span {
+  width: 4px;
+  height: 4px;
+  background: var(--font-color);
+  border-radius: 50%;
+  display: inline-block;
+  animation: typing-bounce 1.2s infinite ease-in-out;
+}
+.typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-3px); opacity: 1; }
 }
 
 /* ===== Floating call popup (timer + hangup) ===== */
