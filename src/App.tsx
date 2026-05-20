@@ -541,6 +541,43 @@ export default function App() {
     }
   }, [settings.myName]);
 
+  // Auto-reconnect to known peers on startup so contacts stay live across
+  // app restarts / updates. Without this, the user has to re-create chats
+  // every time because the live DataConnection dies when the app closes.
+  useEffect(() => {
+    if (!peerReady || !peerRef.current) return;
+    const targets = new Set<string>();
+    for (const r of roomsRef.current) {
+      for (const pid of r.memberPeerIds) targets.add(pid);
+    }
+    for (const pid of targets) {
+      if (peerRef.current.isLinked(pid)) continue;
+      peerRef.current.connect(pid).catch((e) => {
+        console.warn(`[peer] auto-reconnect to ${pid} failed:`, e?.message ?? e);
+      });
+    }
+  }, [peerReady]);
+
+  // Also retry auto-reconnect periodically for peers that aren't connected
+  // (handles the case where the friend comes online later).
+  useEffect(() => {
+    if (!peerReady) return;
+    const interval = setInterval(() => {
+      const pm = peerRef.current;
+      if (!pm) return;
+      const targets = new Set<string>();
+      for (const r of roomsRef.current) {
+        for (const pid of r.memberPeerIds) targets.add(pid);
+      }
+      for (const pid of targets) {
+        if (!pm.isLinked(pid)) {
+          pm.connect(pid).catch(() => {});
+        }
+      }
+    }, 20000);
+    return () => clearInterval(interval);
+  }, [peerReady]);
+
   // ===== Actions =====
   function sendText() {
     if (!activeRoom || !peerRef.current) return;

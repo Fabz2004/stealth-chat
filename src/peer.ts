@@ -27,6 +27,9 @@ export class PeerManager {
   private events: PeerEvents;
   private ready = false;
   private pendingConnects: { peerId: string; resolve: () => void; reject: (e: Error) => void }[] = [];
+  // Tracks connect attempts that started but haven't opened (or failed) yet,
+  // so we don't spam duplicate PeerJS connections during auto-reconnect.
+  private inFlight: Set<string> = new Set();
 
   constructor(savedId: string | undefined, name: string, events: PeerEvents) {
     this.myName = name;
@@ -105,12 +108,15 @@ export class PeerManager {
   private doConnect(peerId: string) {
     if (peerId === this.myId) throw new Error("No te puedes conectar a ti mismo");
     if (this.connections.has(peerId)) return;
+    if (this.inFlight.has(peerId)) return;
+    this.inFlight.add(peerId);
     const conn = this.peer.connect(peerId, { reliable: true });
     this.setupConnection(conn);
   }
 
   private setupConnection(conn: DataConnection) {
     conn.on("open", () => {
+      this.inFlight.delete(conn.peer);
       this.connections.set(conn.peer, conn);
       this.sendOver(conn, { type: "hello", name: this.myName, peerId: this.myId });
       this.events.onConnect(conn.peer);
@@ -123,10 +129,12 @@ export class PeerManager {
       }
     });
     conn.on("close", () => {
+      this.inFlight.delete(conn.peer);
       this.connections.delete(conn.peer);
       this.events.onDisconnect(conn.peer);
     });
     conn.on("error", (err) => {
+      this.inFlight.delete(conn.peer);
       console.error("[peer] conn error", err);
     });
   }
@@ -157,6 +165,11 @@ export class PeerManager {
   isConnected(peerId: string): boolean {
     const c = this.connections.get(peerId);
     return !!c && c.open;
+  }
+
+  /** True if currently connected OR in the middle of opening a connection. */
+  isLinked(peerId: string): boolean {
+    return this.isConnected(peerId) || this.inFlight.has(peerId);
   }
 
   disconnect(peerId: string) {
