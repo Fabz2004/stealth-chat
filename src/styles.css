@@ -105,6 +105,17 @@ input, textarea {
 }
 .dot.on { background: #3ec47a; box-shadow: 0 0 4px #3ec47a; }
 .dot.off { background: #999; opacity: 0.5; }
+.dot.pulse {
+  background: #f3b13e;
+  animation: dot-pulse 1.4s ease-in-out infinite;
+}
+@keyframes dot-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(243, 177, 62, 0.7); transform: scale(1); }
+  50%      { box-shadow: 0 0 0 4px rgba(243, 177, 62, 0); transform: scale(1.2); }
+}
+
+.tab.tab-request { color: #f3b13e; }
+.tab.tab-request.active { background: rgba(243, 177, 62, 0.15); }
 
 .winctl { display: flex; gap: 2px; }
 

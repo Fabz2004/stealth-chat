@@ -159,6 +159,24 @@ export class PeerManager {
     return !!c && c.open;
   }
 
+  disconnect(peerId: string) {
+    const c = this.connections.get(peerId);
+    if (c) {
+      try { c.close(); } catch { /* ignore */ }
+      this.connections.delete(peerId);
+    }
+    const oc = this.outgoingCalls.get(peerId);
+    if (oc) {
+      try { oc.close(); } catch { /* ignore */ }
+      this.outgoingCalls.delete(peerId);
+    }
+    const ic = this.incomingCalls.get(peerId);
+    if (ic) {
+      try { ic.close(); } catch { /* ignore */ }
+      this.incomingCalls.delete(peerId);
+    }
+  }
+
   // ===== Screen share =====
 
   async startScreenShare(peerIds: string[]): Promise<MediaStream> {

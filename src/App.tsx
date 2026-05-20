@@ -120,6 +120,8 @@ export default function App() {
     return Number.isFinite(v) && v >= 0.25 && v <= 0.9 ? v : 0.65;
   });
   const [draggingSplit, setDraggingSplit] = useState(false);
+  // Map of peerId -> display name for peers who connected but we don't know yet.
+  const [incomingRequests, setIncomingRequests] = useState<Map<string, string>>(new Map());
   const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body?: string } | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total?: number } | null>(null);
@@ -278,6 +280,25 @@ export default function App() {
             return r;
           }),
         );
+        // If we don't know this peer at all, queue them as an incoming request.
+        const known = roomsRef.current.some((r) => r.memberPeerIds.includes(fromPeerId));
+        if (!known) {
+          setIncomingRequests((reqs) => {
+            if (reqs.has(fromPeerId)) {
+              // Update name if it changed
+              if (reqs.get(fromPeerId) !== msg.name) {
+                const next = new Map(reqs);
+                next.set(fromPeerId, msg.name);
+                return next;
+              }
+              return reqs;
+            }
+            const next = new Map(reqs);
+            next.set(fromPeerId, msg.name);
+            showToast(`${msg.name} quiere chatear contigo`, 4000);
+            return next;
+          });
+        }
         return;
       }
 
@@ -601,6 +622,42 @@ export default function App() {
     });
   }
 
+  function acceptRequest(peerId: string, name: string) {
+    const id = uid();
+    const room: Room = {
+      id,
+      kind: "dm",
+      name: name || peerId.slice(0, 8),
+      hostPeerId: peerId,
+      isHost: false,
+      memberPeerIds: [peerId],
+      memberNames: { [peerId]: name || "?" },
+      mineColor: DEFAULT_MINE,
+      theirsColor: DEFAULT_THEIRS,
+      messages: [],
+    };
+    setRooms((rs) => [...rs, room]);
+    setActiveId(id);
+    setIncomingRequests((reqs) => {
+      const next = new Map(reqs);
+      next.delete(peerId);
+      return next;
+    });
+  }
+
+  function rejectRequest(peerId: string) {
+    setIncomingRequests((reqs) => {
+      const next = new Map(reqs);
+      next.delete(peerId);
+      return next;
+    });
+    peerRef.current?.disconnect(peerId);
+    if (activeId === `req-${peerId}`) {
+      setActiveId(rooms[0]?.id ?? "");
+    }
+    showToast("Solicitud rechazada");
+  }
+
   function copyMyId() {
     if (!myPeerId) return;
     navigator.clipboard.writeText(myPeerId).catch(() => {});
@@ -649,7 +706,9 @@ export default function App() {
     return { connected, total };
   }
 
-  const showWelcome = rooms.length === 0;
+  const showWelcome = rooms.length === 0 && incomingRequests.size === 0;
+  const activeRequestPeerId = activeId.startsWith("req-") ? activeId.slice(4) : null;
+  const activeRequestName = activeRequestPeerId ? incomingRequests.get(activeRequestPeerId) ?? null : null;
 
   // ===== Render =====
   return (
@@ -672,7 +731,18 @@ export default function App() {
               </button>
             );
           })}
-          {rooms.length > 0 && (
+          {[...incomingRequests.entries()].map(([peerId, name]) => (
+            <button
+              key={`req-${peerId}`}
+              className={`tab tab-request ${activeId === `req-${peerId}` ? "active" : ""}`}
+              onClick={() => setActiveId(`req-${peerId}`)}
+              title={`${name} quiere chatear (click para revisar)`}
+            >
+              <span className="dot pulse" />
+              <span className="tab-name">{name} ?</span>
+            </button>
+          ))}
+          {(rooms.length > 0 || incomingRequests.size > 0) && (
             <button className="tab tab-add" onClick={() => setNewRoomOpen(true)} title="Nuevo chat o grupo">+</button>
           )}
         </div>
@@ -690,6 +760,30 @@ export default function App() {
             setNameSetupOpen(false);
           }}
         />
+      ) : activeRequestPeerId && activeRequestName !== null ? (
+        <div className="welcome">
+          <div className="welcome-card">
+            <div className="welcome-title">Solicitud nueva</div>
+            <div className="welcome-sub">
+              <b>{activeRequestName}</b> quiere chatear contigo.
+            </div>
+            <div className="mycode">
+              <span className="mycode-label">Su código:</span>
+              <code className="mycode-val">{activeRequestPeerId}</code>
+            </div>
+            <div className="welcome-actions">
+              <button className="primary" onClick={() => acceptRequest(activeRequestPeerId, activeRequestName)}>
+                Aceptar y chatear
+              </button>
+              <button className="secondary" onClick={() => rejectRequest(activeRequestPeerId)}>
+                Rechazar
+              </button>
+            </div>
+            <div className="welcome-hint">
+              Verifica el nombre/código con tu amigo antes de aceptar.
+            </div>
+          </div>
+        </div>
       ) : showWelcome ? (
         <div className="welcome">
           <div className="welcome-card">
