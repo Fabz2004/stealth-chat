@@ -2,9 +2,13 @@
 
 Hola, esto es **stealth-chat**, un chat ligero con modo sigilo y screen share. Te lo mando para que probemos.
 
-## ¿Qué incluye el instalador?
+## Descarga
 
-El archivo `stealth-chat_0.1.0_x64-setup.exe` (~2 MB) trae **todo lo necesario**. No instales nada más.
+**👉 https://github.com/Fabz2004/stealth-chat/releases/latest**
+
+Bajas el archivo **`stealth-chat_0.1.0_x64-setup.exe`** (3 MB). Trae todo lo necesario, no instales nada más.
+
+> **Las próximas versiones se actualizan solas.** Solo esta primera vez tienes que descargar manualmente. De ahí en adelante, cuando publique una versión nueva, la app te muestra un popup *"Nueva versión disponible — Actualizar"* y se actualiza sola al darle.
 
 ## Instalación (Windows 10/11)
 
