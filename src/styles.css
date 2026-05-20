@@ -1257,6 +1257,30 @@ hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
 .update-actions { display: flex; gap: 4px; align-items: center; }
 .update-btn { padding: 4px 10px; font-size: 11px; }
 
+/* ===== Call status pill ===== */
+.call-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(62, 196, 122, 0.10);
+  border-bottom: 1px solid rgba(62, 196, 122, 0.25);
+  padding: 4px 10px;
+  font-size: 11px;
+  color: #8ee9ad;
+}
+
+.call-status-dot {
+  width: 8px;
+  height: 8px;
+  background: #3ec47a;
+  border-radius: 50%;
+  box-shadow: 0 0 6px #3ec47a;
+  animation: dot-pulse 1.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.call-status-text b { color: #b6f0c8; }
+
 /* ===== Hotkey editor ===== */
 .hotkey-modal { width: min(320px, 90%); }
 

@@ -179,15 +179,37 @@ function loadRooms(): Room[] {
     const raw = localStorage.getItem(LS_ROOMS);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as Room[];
-    return parsed.map((r) => ({ ...r, messages: [] }));
+    // Restore messages saved in localStorage (cap at MAX to be safe).
+    return parsed.map((r) => ({
+      ...r,
+      messages: Array.isArray(r.messages)
+        ? r.messages.slice(-MAX_PERSISTED_MSGS_PER_ROOM)
+        : [],
+    }));
   } catch {
     return [];
   }
 }
 
+// Maximum messages we persist per room. localStorage has ~5-10MB total, and an image
+// data URL can easily be 100KB+, so we cap aggressively to avoid filling it up.
+const MAX_PERSISTED_MSGS_PER_ROOM = 200;
+
 function saveRooms(rooms: Room[]) {
-  const stripped = rooms.map(({ messages: _m, ...r }) => ({ ...r, messages: [] }));
-  localStorage.setItem(LS_ROOMS, JSON.stringify(stripped));
+  // Persist last N messages per room so the chat history survives restarts.
+  // Older messages and very large image data are quietly dropped if storage is full.
+  const trimmed = rooms.map((r) => ({
+    ...r,
+    messages: r.messages.slice(-MAX_PERSISTED_MSGS_PER_ROOM),
+  }));
+  try {
+    localStorage.setItem(LS_ROOMS, JSON.stringify(trimmed));
+  } catch (e) {
+    // localStorage full — fall back to metadata only (no messages this save).
+    console.warn("[rooms] localStorage full, dropping message bodies", e);
+    const stripped = rooms.map((r) => ({ ...r, messages: [] }));
+    try { localStorage.setItem(LS_ROOMS, JSON.stringify(stripped)); } catch { /* give up */ }
+  }
 }
 
 function loadSettings(): AppSettings {
@@ -787,6 +809,10 @@ export default function App() {
     const interval = setInterval(() => {
       const pm = peerRef.current;
       if (!pm) return;
+      // Recover the signaling link if it dropped (common after sleep/wake).
+      if (pm.isSignalingDown()) {
+        pm.forceSignalingReconnect();
+      }
       const targets = new Set<string>();
       for (const r of roomsRef.current) {
         for (const pid of r.memberPeerIds) targets.add(pid);
@@ -798,6 +824,54 @@ export default function App() {
       }
     }, 20000);
     return () => clearInterval(interval);
+  }, [peerReady]);
+
+  // Wake-from-sleep detection: setInterval ticks should land ~1s apart.
+  // If a tick is way late, the laptop was sleeping. Force a reconnect immediately
+  // (don't wait for the 20s interval above).
+  useEffect(() => {
+    if (!peerReady) return;
+    let lastTick = Date.now();
+    function tick() {
+      const now = Date.now();
+      const gap = now - lastTick;
+      lastTick = now;
+      if (gap > 5000) {
+        console.log(`[wake] Detected sleep/wake gap of ${gap}ms — forcing reconnect`);
+        const pm = peerRef.current;
+        if (pm) {
+          pm.forceSignalingReconnect();
+          for (const r of roomsRef.current) {
+            for (const pid of r.memberPeerIds) {
+              if (!pm.isLinked(pid)) pm.connect(pid).catch(() => {});
+            }
+          }
+        }
+      }
+    }
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [peerReady]);
+
+  // Network-online recovery: browser fires `online` when the network adapter comes back.
+  useEffect(() => {
+    if (!peerReady) return;
+    function onOnline() {
+      console.log("[network] back online — forcing reconnect");
+      const pm = peerRef.current;
+      if (!pm) return;
+      // Small delay to let the network actually settle before retrying
+      setTimeout(() => {
+        pm.forceSignalingReconnect();
+        for (const r of roomsRef.current) {
+          for (const pid of r.memberPeerIds) {
+            if (!pm.isLinked(pid)) pm.connect(pid).catch(() => {});
+          }
+        }
+      }, 1500);
+    }
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
   }, [peerReady]);
 
   // ===== Actions =====
@@ -1470,6 +1544,24 @@ export default function App() {
         </div>
       ) : activeRoom ? (
         <>
+          {voiceActive && (() => {
+            // Pill showing who you're currently on a call with (in this room).
+            const peersInCall = activeRoom.memberPeerIds.filter(
+              (pid) => peerRef.current?.isConnected(pid),
+            );
+            const names = peersInCall.map((pid) => activeRoom.memberNames[pid] ?? pid.slice(0, 8));
+            return (
+              <div className="call-status">
+                <span className="call-status-dot" />
+                <span className="call-status-text">
+                  En llamada con <b>{names.join(", ") || "(esperando)"}</b>
+                  {cameraActive && " · cámara"}
+                  {micMuted && " · silenciado"}
+                </span>
+              </div>
+            );
+          })()}
+
           {(() => {
             const roomStreams = [...remoteStreams.entries()].filter(
               ([pid]) => activeRoom.memberPeerIds.includes(pid) && !hiddenStreamPeerIds.has(pid),
@@ -1620,7 +1712,8 @@ export default function App() {
                 onClick={toggleCamera}
                 title={cameraActive ? "Apagar cámara" : "Encender cámara"}
               >
-                <Icon name={cameraActive ? "cam-off" : "cam"} />
+                {/* Discord/Zoom convention: slash = off, no slash = on/active */}
+                <Icon name={cameraActive ? "cam" : "cam-off"} />
               </button>
             )}
             <div className="composer-input-wrap">

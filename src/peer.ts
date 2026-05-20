@@ -154,9 +154,31 @@ export class PeerManager {
 
     this.peer.on("disconnected", () => {
       setTimeout(() => {
-        if (!this.peer.destroyed) this.peer.reconnect();
+        if (!this.peer.destroyed) {
+          try { this.peer.reconnect(); } catch (e) { console.warn("[peer] reconnect failed", e); }
+        }
       }, 1500);
     });
+  }
+
+  /** Force a re-establish of the PeerJS signaling link (used on wake from sleep / network change). */
+  forceSignalingReconnect() {
+    if (this.peer.destroyed) return false;
+    if (this.peer.disconnected) {
+      try {
+        this.peer.reconnect();
+        return true;
+      } catch (e) {
+        console.warn("[peer] forceSignalingReconnect failed", e);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** True if our connection to PeerJS Cloud is currently down. */
+  isSignalingDown(): boolean {
+    return this.peer.disconnected || this.peer.destroyed;
   }
 
   setName(name: string) {
