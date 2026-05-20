@@ -48,6 +48,7 @@ type AppSettings = {
   clickThrough: boolean;
   skipTaskbar: boolean;
   notifSound: boolean;
+  toggleShortcut?: string;
 };
 
 const DEFAULT_MINE = "#3a3d4a";
@@ -64,6 +65,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   clickThrough: false,
   skipTaskbar: true,
   notifSound: true,
+  toggleShortcut: "Ctrl+Shift+H",
 };
 
 // Subtle generated chime — no asset needed. Two short pure tones, total ~280ms.
@@ -110,6 +112,26 @@ function playNotifSound() {
 const LS_ROOMS = "sc.rooms";
 const LS_SETTINGS = "sc.settings";
 const LS_ACTIVE = "sc.activeId";
+const LS_STICKERS = "sc.stickers";
+
+type Sticker = { id: string; dataUrl: string; name: string };
+
+function loadStickers(): Sticker[] {
+  try {
+    const raw = localStorage.getItem(LS_STICKERS);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveStickersLs(items: Sticker[]) {
+  try {
+    localStorage.setItem(LS_STICKERS, JSON.stringify(items));
+  } catch (e) {
+    console.warn("[stickers] localStorage full", e);
+  }
+}
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -143,6 +165,7 @@ function Icon({ name, size = 16 }: { name: string; size?: number }) {
     minimize: <line x1="5" y1="12" x2="19" y2="12"/>,
     x: <><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></>,
     reply: <><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></>,
+    sticker: <><circle cx="12" cy="12" r="10"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/></>,
   };
   return (
     <svg width={size} height={size} {...ICON_PROPS}>
@@ -236,6 +259,9 @@ export default function App() {
   const [musicOpen, setMusicOpen] = useState(false);
   const [musicHostId, setMusicHostId] = useState<string | null>(null);
   const [musicPickerOpen, setMusicPickerOpen] = useState(false);
+  const [stickers, setStickers] = useState<Sticker[]>(() => loadStickers());
+  const [stickerPickerOpen, setStickerPickerOpen] = useState(false);
+  const [hotkeyEditorOpen, setHotkeyEditorOpen] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body?: string } | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total?: number } | null>(null);
@@ -256,6 +282,7 @@ export default function App() {
 
   useEffect(() => saveRooms(rooms), [rooms]);
   useEffect(() => saveSettings(settings), [settings]);
+  useEffect(() => saveStickersLs(stickers), [stickers]);
   useEffect(() => {
     if (activeId) localStorage.setItem(LS_ACTIVE, activeId);
     // Mark the now-active room as read
@@ -396,6 +423,28 @@ export default function App() {
   useEffect(() => {
     getVersion().then(setAppVersion).catch(() => {});
   }, []);
+
+  // Apply saved toggle shortcut on startup (in case user changed it from default).
+  useEffect(() => {
+    const sc = settings.toggleShortcut ?? "Ctrl+Shift+H";
+    if (sc === "Ctrl+Shift+H") return; // already registered by Rust setup
+    invoke("set_toggle_shortcut", { shortcut: sc }).catch((e) =>
+      console.warn("[shortcut] could not apply saved shortcut", e),
+    );
+  }, []);
+
+  function applyNewShortcut(combo: string) {
+    invoke("set_toggle_shortcut", { shortcut: combo })
+      .then(() => {
+        setSettings((s) => ({ ...s, toggleShortcut: combo }));
+        setHotkeyEditorOpen(false);
+        showToast(`Atajo cambiado a ${combo}`);
+      })
+      .catch((e) => {
+        console.error(e);
+        showToast(`No se pudo cambiar el atajo: ${e}`);
+      });
+  }
 
   // Check for updates on startup
   useEffect(() => {
@@ -923,6 +972,48 @@ export default function App() {
     setReplyingTo(null);
   }
 
+  async function importStickers() {
+    try {
+      const paths = await open({
+        multiple: true,
+        filters: [{ name: "Stickers", extensions: ["png", "webp", "gif", "jpg", "jpeg"] }],
+      });
+      if (!paths) return;
+      const arr = Array.isArray(paths) ? paths : [paths];
+      const newOnes: Sticker[] = [];
+      for (const p of arr) {
+        if (typeof p !== "string") continue;
+        try {
+          const bytes = await readFile(p);
+          const ext = p.split(".").pop()?.toLowerCase() ?? "png";
+          const mime = ext === "jpg" ? "jpeg" : ext;
+          const b64 = btoa(String.fromCharCode(...new Uint8Array(bytes)));
+          const dataUrl = `data:image/${mime};base64,${b64}`;
+          const name = p.split(/[\\/]/).pop() ?? "sticker";
+          newOnes.push({ id: uid(), dataUrl, name });
+        } catch (e) {
+          console.error("[stickers] failed to read", p, e);
+        }
+      }
+      if (newOnes.length > 0) {
+        setStickers((s) => [...s, ...newOnes]);
+        showToast(`${newOnes.length} sticker(s) importado(s)`);
+      }
+    } catch (e) {
+      console.error(e);
+      showToast("No se pudo importar stickers");
+    }
+  }
+
+  function deleteSticker(id: string) {
+    setStickers((s) => s.filter((x) => x.id !== id));
+  }
+
+  function sendSticker(s: Sticker) {
+    sendImageDataUrl(s.dataUrl);
+    setStickerPickerOpen(false);
+  }
+
   async function attachImage() {
     if (!activeRoom || !peerRef.current) return;
     try {
@@ -1319,6 +1410,7 @@ export default function App() {
             <button className="tab tab-add" onClick={() => setNewRoomOpen(true)} title="Nuevo chat o grupo">+</button>
           )}
         </div>
+        <div className="topbar-spacer" data-tauri-drag-region title="Arrastra aquí para mover" />
         <div className="winctl">
           <button className="winbtn" onClick={() => setSettingsOpen((s) => !s)} title="Ajustes">⚙</button>
           <button className="winbtn" onClick={hideWindow} title="Ocultar (Ctrl+Shift+H para volver)">–</button>
@@ -1485,6 +1577,9 @@ export default function App() {
           <footer className="composer">
             <button className="iconbtn" onClick={attachImage} title="Adjuntar imagen" disabled={!peerReady}>
               <Icon name="image" />
+            </button>
+            <button className="iconbtn" onClick={() => setStickerPickerOpen(true)} title="Stickers" disabled={!peerReady}>
+              <Icon name="sticker" />
             </button>
             <button
               className={`iconbtn ${isSharing ? "is-on" : ""}`}
@@ -1714,8 +1809,15 @@ export default function App() {
             />
           </label>
 
+          <hr />
+          <div className="section-title">Atajo global</div>
+          <div className="row">
+            <span>Mostrar/ocultar</span>
+            <code className="row-code">{settings.toggleShortcut ?? "Ctrl+Shift+H"}</code>
+            <button className="linkbtn" onClick={() => setHotkeyEditorOpen(true)}>Cambiar</button>
+          </div>
           <div className="hint">
-            <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd> oculta/muestra (también apaga click-a-través)
+            (También apaga click-a-través al mostrar)
           </div>
 
           <hr />
@@ -1879,6 +1981,24 @@ export default function App() {
         <MusicPicker
           onClose={() => setMusicPickerOpen(false)}
           onPick={(vid) => { setMusicPickerOpen(false); openMusic(vid); }}
+        />
+      )}
+
+      {stickerPickerOpen && (
+        <StickerPicker
+          stickers={stickers}
+          onPick={sendSticker}
+          onImport={importStickers}
+          onDelete={deleteSticker}
+          onClose={() => setStickerPickerOpen(false)}
+        />
+      )}
+
+      {hotkeyEditorOpen && (
+        <HotkeyEditor
+          current={settings.toggleShortcut ?? "Ctrl+Shift+H"}
+          onSave={applyNewShortcut}
+          onClose={() => setHotkeyEditorOpen(false)}
         />
       )}
 
@@ -2267,6 +2387,160 @@ function YouTubePlayer({
           {isHost && <button className="rv-btn" onClick={onClose}>cerrar para todos</button>}
           {!isHost && <button className="rv-btn" onClick={onClose}>cerrar (solo mío)</button>}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function HotkeyEditor({
+  current,
+  onSave,
+  onClose,
+}: {
+  current: string;
+  onSave: (combo: string) => void;
+  onClose: () => void;
+}) {
+  const [mods, setMods] = useState<Set<string>>(new Set());
+  const [mainKey, setMainKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      // Only handle while modal is open and ONLY keyboard. We deliberately don't
+      // listen for mouse events to avoid accidentally binding the click that
+      // confirms the dialog.
+      e.preventDefault();
+      e.stopPropagation();
+      const m = new Set<string>();
+      if (e.ctrlKey) m.add("Ctrl");
+      if (e.shiftKey) m.add("Shift");
+      if (e.altKey) m.add("Alt");
+      if (e.metaKey) m.add("Meta");
+
+      const k = e.key;
+      // Ignore plain modifier presses — they're not a complete combo.
+      if (k === "Control" || k === "Shift" || k === "Alt" || k === "Meta") {
+        setMods(m);
+        return;
+      }
+      // Map JS key strings to Tauri accelerator format.
+      let mapped: string | null = null;
+      if (k.length === 1 && /[a-zA-Z]/.test(k)) mapped = k.toUpperCase();
+      else if (k.length === 1 && /[0-9]/.test(k)) mapped = k;
+      else if (/^F([1-9]|1[0-2])$/.test(k)) mapped = k; // F1-F12
+      else if (k === " ") mapped = "Space";
+      else if (k === "Enter") mapped = "Enter";
+      else if (k === "Tab") mapped = "Tab";
+      else if (k === "Escape") {
+        // Escape closes the editor instead of binding
+        onClose();
+        return;
+      }
+      else if (k.startsWith("Arrow")) {
+        mapped = k.replace("Arrow", "");
+      }
+      if (mapped) {
+        setMods(m);
+        setMainKey(mapped);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [onClose]);
+
+  const combo = mainKey ? [...mods, mainKey].join("+") : "";
+  const isValid = !!mainKey && mods.size > 0;
+
+  function accept() {
+    if (!isValid) return;
+    onSave(combo);
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal hotkey-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <span>Cambiar atajo</span>
+          <button className="winbtn" onClick={onClose}>×</button>
+        </div>
+        <div className="hotkey-current">
+          <span className="hotkey-label">Atajo actual:</span>
+          <code>{current}</code>
+        </div>
+        <div className="hotkey-capture">
+          <div className="hint" style={{ marginBottom: 6 }}>
+            Presiona la combinación que quieras (necesita al menos un modificador: Ctrl / Shift / Alt).
+          </div>
+          <div className={`hotkey-combo ${isValid ? "valid" : ""}`}>
+            {combo || "esperando…"}
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button className="secondary" onClick={onClose}>Cancelar</button>
+          <button
+            className="primary"
+            disabled={!isValid}
+            onClick={accept}
+          >
+            Aceptar
+          </button>
+        </div>
+        <div className="hint" style={{ marginTop: 4 }}>
+          Esc cancela. Solo se captura teclado — los clicks del mouse no se registran.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StickerPicker({
+  stickers,
+  onPick,
+  onImport,
+  onDelete,
+  onClose,
+}: {
+  stickers: Sticker[];
+  onPick: (s: Sticker) => void;
+  onImport: () => void;
+  onDelete: (id: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="sticker-backdrop" onClick={onClose}>
+      <div className="sticker-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="sticker-head">
+          <span>Stickers ({stickers.length})</span>
+          <div style={{ display: "flex", gap: 4 }}>
+            <button className="linkbtn" onClick={onImport}>+ importar</button>
+            <button className="winbtn" onClick={onClose}>×</button>
+          </div>
+        </div>
+        {stickers.length === 0 ? (
+          <div className="sticker-empty">
+            <div style={{ opacity: 0.7, fontSize: 12, marginBottom: 8 }}>
+              Aún no tienes stickers
+            </div>
+            <button className="primary" onClick={onImport}>Importar imágenes</button>
+            <div className="hint" style={{ marginTop: 8 }}>
+              Soporta .webp .png .gif .jpg<br />
+              Para WhatsApp: guarda el sticker como imagen desde la app, después impórtalo aquí.
+            </div>
+          </div>
+        ) : (
+          <div className="sticker-grid">
+            {stickers.map((s) => (
+              <div key={s.id} className="sticker-item" title={s.name}>
+                <img src={s.dataUrl} alt="" onClick={() => onPick(s)} />
+                <button
+                  className="sticker-delete"
+                  onClick={(e) => { e.stopPropagation(); if (confirm("¿Eliminar este sticker?")) onDelete(s.id); }}
+                  title="Eliminar"
+                >×</button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

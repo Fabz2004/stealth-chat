@@ -60,8 +60,15 @@ if (-not (Test-Path $exe)) {
   exit 1
 }
 
+# Make a versionless copy with a stable name so the share URL never breaks across releases.
+$stableExe = "src-tauri/target/release/bundle/nsis/Chati-setup.exe"
+$stableSig = "src-tauri/target/release/bundle/nsis/Chati-setup.exe.sig"
+Copy-Item $exe $stableExe -Force
+Copy-Item $sig $stableSig -Force
+
 Write-Host "==> Patching latest.json with GitHub release URL" -ForegroundColor Cyan
 # Build latest.json from the .exe.sig produced by tauri (createUpdaterArtifacts only writes the .sig).
+# Point the updater at the stable (versionless) URL so older clients keep finding new releases.
 $sigContent = (Get-Content $sig -Raw).Trim()
 $manifest = [ordered]@{
   version  = $Version
@@ -70,7 +77,7 @@ $manifest = [ordered]@{
   platforms = [ordered]@{
     'windows-x86_64' = [ordered]@{
       signature = $sigContent
-      url       = "https://github.com/$GitHubUser/stealth-chat/releases/download/v$Version/stealth-chat_${Version}_x64-setup.exe"
+      url       = "https://github.com/$GitHubUser/stealth-chat/releases/download/v$Version/Chati-setup.exe"
     }
   }
 }
@@ -80,6 +87,8 @@ Write-Host ""
 Write-Host "==> Done. Artifacts:" -ForegroundColor Green
 Write-Host "  $exe"
 Write-Host "  $sig"
+Write-Host "  $stableExe   (versionless mirror)"
+Write-Host "  $stableSig"
 Write-Host "  $json"
 Write-Host ""
 Write-Host "Next steps:"

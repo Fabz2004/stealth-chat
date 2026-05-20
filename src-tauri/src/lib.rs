@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use tauri::{Manager, Emitter};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
@@ -32,6 +33,16 @@ fn toggle_visibility(window: tauri::WebviewWindow) -> Result<(), String> {
     }
 }
 
+/// Replace the currently registered global shortcut with a new one (e.g. "Ctrl+Shift+H").
+#[tauri::command]
+fn set_toggle_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String> {
+    let parsed = Shortcut::from_str(&shortcut)
+        .map_err(|e| format!("Atajo inválido '{}': {}", shortcut, e))?;
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+    gs.register(parsed).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -42,26 +53,21 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, shortcut, event| {
+                .with_handler(|app, _shortcut, event| {
+                    // We only ever register one shortcut at a time (the user can rebind it),
+                    // so any press here is the toggle command.
                     if event.state() == ShortcutState::Pressed {
                         if let Some(window) = app.get_webview_window("main") {
-                            let toggle = Shortcut::new(
-                                Some(Modifiers::CONTROL | Modifiers::SHIFT),
-                                Code::KeyH,
-                            );
-                            if shortcut == &toggle {
-                                let visible = window.is_visible().unwrap_or(false);
-                                let minimized = window.is_minimized().unwrap_or(false);
-                                // Restore if hidden OR minimized. Only hide when truly visible on screen.
-                                if visible && !minimized {
-                                    let _ = window.hide();
-                                } else {
-                                    let _ = window.unminimize();
-                                    let _ = window.set_ignore_cursor_events(false);
-                                    let _ = window.show();
-                                    let _ = window.set_focus();
-                                    let _ = window.emit("click-through-disabled", ());
-                                }
+                            let visible = window.is_visible().unwrap_or(false);
+                            let minimized = window.is_minimized().unwrap_or(false);
+                            if visible && !minimized {
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.unminimize();
+                                let _ = window.set_ignore_cursor_events(false);
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                let _ = window.emit("click-through-disabled", ());
                             }
                         }
                     }
@@ -100,6 +106,7 @@ pub fn run() {
             set_always_on_top,
             set_skip_taskbar,
             toggle_visibility,
+            set_toggle_shortcut,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
