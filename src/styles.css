@@ -50,6 +50,189 @@ input, textarea {
   grid-template-rows: var(--topbar-h) 1fr;
 }
 
+/* ===== Sidebar mode ===== */
+.app.with-sidebar {
+  grid-template-columns: 170px 1fr;
+  grid-template-areas:
+    "sidebar topbar"
+    "sidebar chat"
+    "sidebar composer";
+  grid-template-rows: var(--topbar-h) 1fr var(--composer-h);
+}
+.app.with-sidebar.with-sidebar:has(.welcome) {
+  grid-template-areas:
+    "sidebar topbar"
+    "sidebar chat";
+  grid-template-rows: var(--topbar-h) 1fr;
+}
+
+.sidebar {
+  grid-area: sidebar;
+  background: color-mix(in srgb, var(--bg-tint) 80%, transparent);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-head {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  opacity: 0.85;
+}
+
+.sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sidebar-item {
+  background: transparent;
+  color: var(--font-color);
+  border: none;
+  padding: 6px 8px;
+  font-size: 12px;
+  border-radius: 5px;
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.75;
+}
+.sidebar-item:hover { background: rgba(255, 255, 255, 0.05); opacity: 1; }
+.sidebar-item.active { background: rgba(255, 255, 255, 0.10); font-weight: 600; opacity: 1; }
+.sidebar-item.has-unread:not(.active) { opacity: 1; font-weight: 600; }
+.sidebar-item .sidebar-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-item.sidebar-request { color: #f3b13e; }
+
+.sidebar-add {
+  background: transparent;
+  color: var(--accent);
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  padding: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.sidebar-add:hover { background: rgba(74, 140, 255, 0.08); }
+
+.topbar-title {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0 8px;
+  opacity: 0.85;
+}
+
+/* ===== Command palette ===== */
+.cmd-palette {
+  width: min(420px, 95%);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cmd-input {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--font-color);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  outline: none;
+}
+.cmd-input:focus { border-color: var(--accent); }
+
+.cmd-results {
+  display: flex;
+  flex-direction: column;
+  max-height: 300px;
+  overflow-y: auto;
+  gap: 1px;
+}
+
+.cmd-result {
+  background: transparent;
+  color: var(--font-color);
+  border: none;
+  padding: 7px 10px;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.cmd-result.selected, .cmd-result:hover { background: rgba(74, 140, 255, 0.18); }
+
+.cmd-empty {
+  padding: 14px 10px;
+  font-size: 12px;
+  opacity: 0.55;
+  text-align: center;
+}
+
+/* ===== Activity feed ===== */
+.activity-panel {
+  position: absolute;
+  top: calc(var(--topbar-h) + 4px);
+  right: 6px;
+  width: 280px;
+  max-height: calc(100vh - 60px);
+  background: color-mix(in srgb, var(--bg-tint) 96%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 18;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+}
+
+.activity-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 0 2px 4px 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.activity-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.activity-item {
+  background: transparent;
+  color: var(--font-color);
+  border: none;
+  padding: 5px 8px;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+  border-left: 3px solid transparent;
+}
+.activity-item:hover { background: rgba(255, 255, 255, 0.05); }
+.activity-msg   { border-left-color: var(--accent); }
+.activity-voice { border-left-color: #3ec47a; }
+.activity-share { border-left-color: #f3b13e; }
+.activity-system{ border-left-color: rgba(255,255,255,0.4); }
+.activity-text { font-weight: 500; line-height: 1.3; }
+.activity-meta { font-size: 9px; opacity: 0.55; margin-top: 1px; }
+
 .app.blurred { opacity: 0.94; }
 
 /* ===== Top bar ===== */
@@ -298,6 +481,12 @@ input, textarea {
   background: color-mix(in srgb, var(--theirs) calc(var(--theirs-opacity, 1) * 100%), transparent);
   align-self: flex-start;
   border-bottom-left-radius: 3px;
+}
+
+/* Gemini AI replies styled distinctly so they don't look like a regular member */
+.msg.theirs:has(> .msg-author:first-child:has-text("Gemini")) {
+  background: linear-gradient(135deg, rgba(120, 60, 200, 0.25), rgba(74, 140, 255, 0.18));
+  border: 1px solid rgba(200, 150, 255, 0.3);
 }
 
 .msg-author {
@@ -1257,7 +1446,63 @@ hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
 .update-actions { display: flex; gap: 4px; align-items: center; }
 .update-btn { padding: 4px 10px; font-size: 11px; }
 
-/* ===== Call status pill ===== */
+/* ===== Floating call popup (timer + hangup) ===== */
+.call-popup {
+  position: absolute;
+  top: calc(var(--topbar-h) + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(20, 22, 30, 0.95);
+  border: 1px solid rgba(62, 196, 122, 0.4);
+  border-radius: 18px;
+  padding: 4px 6px 4px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--font-color);
+  z-index: 33;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
+  animation: notif-slide-in 0.18s ease-out;
+}
+
+.call-popup-dot {
+  width: 8px;
+  height: 8px;
+  background: #3ec47a;
+  border-radius: 50%;
+  box-shadow: 0 0 6px #3ec47a;
+  animation: dot-pulse 1.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.call-popup-text b { color: #b6f0c8; }
+
+.call-popup-time {
+  font-family: monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: #8ee9ad;
+  margin-left: 4px;
+}
+
+.call-popup-hangup {
+  background: #c0392b;
+  color: white;
+  border: none;
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 2px;
+}
+.call-popup-hangup:hover { filter: brightness(1.15); }
+
+/* ===== Call status pill (inside chat area) ===== */
 .call-status {
   display: flex;
   align-items: center;

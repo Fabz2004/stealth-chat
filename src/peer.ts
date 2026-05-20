@@ -9,7 +9,9 @@ export type WireMsg =
   | { type: "members"; groupId: string; members: { peerId: string; name: string }[] }
   | { type: "music-open"; videoId: string; toGroup?: string; ts: number }
   | { type: "music-state"; playing: boolean; positionSec: number; ts: number; toGroup?: string }
-  | { type: "music-close"; toGroup?: string; ts: number };
+  | { type: "music-close"; toGroup?: string; ts: number }
+  | { type: "ping"; ts: number }
+  | { type: "pong"; ts: number };
 
 export type IncomingVoiceCall = {
   peerId: string;
@@ -55,6 +57,10 @@ export class PeerManager {
   // Tracks connect attempts that started but haven't opened (or failed) yet,
   // so we don't spam duplicate PeerJS connections during auto-reconnect.
   private inFlight: Set<string> = new Set();
+  // Liveness: track when we last received a pong from each peer. If too stale,
+  // we treat the connection as dead even if PeerJS hasn't realized it yet.
+  private lastPong: Map<string, number> = new Map();
+  private heartbeatInterval?: number;
 
   constructor(savedId: string | undefined, name: string, events: PeerEvents) {
     this.myName = name;
@@ -74,6 +80,7 @@ export class PeerManager {
         }
       }
       this.pendingConnects = [];
+      this.startHeartbeat();
     });
 
     this.peer.on("connection", (conn) => this.setupConnection(conn));
@@ -236,12 +243,42 @@ export class PeerManager {
     conn.on("open", () => {
       this.inFlight.delete(conn.peer);
       this.connections.set(conn.peer, conn);
+      this.lastPong.set(conn.peer, Date.now());
       this.sendOver(conn, { type: "hello", name: this.myName, peerId: this.myId });
       this.events.onConnect(conn.peer);
+      // Listen to the underlying WebRTC state for fast disconnect detection
+      // (PeerJS's own close event sometimes never fires when network drops abruptly).
+      const rtc = (conn as any).peerConnection as RTCPeerConnection | undefined;
+      if (rtc) {
+        rtc.addEventListener("iceconnectionstatechange", () => {
+          const s = rtc.iceConnectionState;
+          if (s === "failed" || s === "closed") {
+            this.markConnectionDead(conn);
+          } else if (s === "disconnected") {
+            // Could be transient — re-check after a moment
+            setTimeout(() => {
+              const cur = rtc.iceConnectionState;
+              if (cur === "disconnected" || cur === "failed" || cur === "closed") {
+                this.markConnectionDead(conn);
+              }
+            }, 3000);
+          }
+        });
+      }
     });
     conn.on("data", (data) => {
+      const msg = data as WireMsg;
+      // Heartbeat is internal — answer pings, record pongs, never bubble to the app.
+      if (msg.type === "ping") {
+        this.sendOver(conn, { type: "pong", ts: msg.ts });
+        return;
+      }
+      if (msg.type === "pong") {
+        this.lastPong.set(conn.peer, Date.now());
+        return;
+      }
       try {
-        this.events.onMessage(conn.peer, data as WireMsg);
+        this.events.onMessage(conn.peer, msg);
       } catch (e) {
         console.error("[peer] onMessage error", e);
       }
@@ -249,12 +286,42 @@ export class PeerManager {
     conn.on("close", () => {
       this.inFlight.delete(conn.peer);
       this.connections.delete(conn.peer);
+      this.lastPong.delete(conn.peer);
       this.events.onDisconnect(conn.peer);
     });
     conn.on("error", (err) => {
       this.inFlight.delete(conn.peer);
       console.error("[peer] conn error", err);
     });
+  }
+
+  private markConnectionDead(conn: DataConnection) {
+    const pid = conn.peer;
+    if (!this.connections.has(pid)) return;
+    console.log(`[peer] connection to ${pid} declared dead`);
+    try { conn.close(); } catch { /* ignore */ }
+    this.connections.delete(pid);
+    this.lastPong.delete(pid);
+    this.events.onDisconnect(pid);
+  }
+
+  private startHeartbeat() {
+    if (this.heartbeatInterval) return;
+    this.heartbeatInterval = window.setInterval(() => {
+      const now = Date.now();
+      for (const [pid, conn] of [...this.connections]) {
+        if (!conn.open) {
+          this.markConnectionDead(conn);
+          continue;
+        }
+        this.sendOver(conn, { type: "ping", ts: now });
+        const last = this.lastPong.get(pid) ?? now;
+        // 35s without a pong = treat as dead. 3 missed heartbeats with a 12s interval.
+        if (now - last > 35000) {
+          this.markConnectionDead(conn);
+        }
+      }
+    }, 12000);
   }
 
   send(peerId: string, msg: WireMsg): boolean {
@@ -513,6 +580,10 @@ export class PeerManager {
     this.stopScreenShare();
     this.stopVoice();
     this.stopCamera();
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = undefined;
+    }
     try { this.peer.destroy(); } catch { /* ignore */ }
   }
 }

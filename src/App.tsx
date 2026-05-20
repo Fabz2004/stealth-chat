@@ -8,6 +8,7 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
 import { PeerManager, WireMsg, ReplyRef, IncomingVoiceCall } from "./peer";
+import { saveMessageToDb, loadMessagesFromDb, deleteRoomMessagesFromDb } from "./db";
 
 type RoomKind = "dm" | "group";
 
@@ -49,6 +50,8 @@ type AppSettings = {
   skipTaskbar: boolean;
   notifSound: boolean;
   toggleShortcut?: string;
+  geminiApiKey?: string;
+  sidebarMode?: boolean;
 };
 
 const DEFAULT_MINE = "#3a3d4a";
@@ -66,6 +69,15 @@ const DEFAULT_SETTINGS: AppSettings = {
   skipTaskbar: true,
   notifSound: true,
   toggleShortcut: "Ctrl+Shift+H",
+  sidebarMode: false,
+};
+
+type ActivityItem = {
+  id: string;
+  ts: number;
+  text: string;
+  kind: "msg" | "voice" | "share" | "system";
+  roomId?: string;
 };
 
 // Subtle generated chime — no asset needed. Two short pure tones, total ~280ms.
@@ -179,36 +191,21 @@ function loadRooms(): Room[] {
     const raw = localStorage.getItem(LS_ROOMS);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as Room[];
-    // Restore messages saved in localStorage (cap at MAX to be safe).
-    return parsed.map((r) => ({
-      ...r,
-      messages: Array.isArray(r.messages)
-        ? r.messages.slice(-MAX_PERSISTED_MSGS_PER_ROOM)
-        : [],
-    }));
+    // Start with empty messages — they'll be hydrated from IndexedDB after mount.
+    return parsed.map((r) => ({ ...r, messages: [] }));
   } catch {
     return [];
   }
 }
 
-// Maximum messages we persist per room. localStorage has ~5-10MB total, and an image
-// data URL can easily be 100KB+, so we cap aggressively to avoid filling it up.
-const MAX_PERSISTED_MSGS_PER_ROOM = 200;
-
+// Room metadata in localStorage is small (no messages). Messages live in IndexedDB
+// which has a much larger quota (typically 50MB-1GB).
 function saveRooms(rooms: Room[]) {
-  // Persist last N messages per room so the chat history survives restarts.
-  // Older messages and very large image data are quietly dropped if storage is full.
-  const trimmed = rooms.map((r) => ({
-    ...r,
-    messages: r.messages.slice(-MAX_PERSISTED_MSGS_PER_ROOM),
-  }));
+  const stripped = rooms.map((r) => ({ ...r, messages: [] }));
   try {
-    localStorage.setItem(LS_ROOMS, JSON.stringify(trimmed));
+    localStorage.setItem(LS_ROOMS, JSON.stringify(stripped));
   } catch (e) {
-    // localStorage full — fall back to metadata only (no messages this save).
-    console.warn("[rooms] localStorage full, dropping message bodies", e);
-    const stripped = rooms.map((r) => ({ ...r, messages: [] }));
-    try { localStorage.setItem(LS_ROOMS, JSON.stringify(stripped)); } catch { /* give up */ }
+    console.warn("[rooms] localStorage write failed", e);
   }
 }
 
@@ -263,6 +260,17 @@ export default function App() {
   const msgNotifTimer = useRef<number | null>(null);
   // Voice call state
   const [voiceActive, setVoiceActive] = useState(false);
+  const voiceActiveRef = useRef(false);
+  useEffect(() => { voiceActiveRef.current = voiceActive; }, [voiceActive]);
+  // Track when the active call started so we can show elapsed time.
+  const [callStartTs, setCallStartTs] = useState<number | null>(null);
+  const [callTick, setCallTick] = useState(0);
+  // Re-render every second while a call is active so the timer ticks.
+  useEffect(() => {
+    if (!callStartTs) return;
+    const id = setInterval(() => setCallTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [callStartTs]);
   const [micMuted, setMicMuted] = useState(false);
   const [remoteVoiceStreams, setRemoteVoiceStreams] = useState<Map<string, MediaStream>>(new Map());
   // Incoming voice call awaiting accept/reject
@@ -284,6 +292,13 @@ export default function App() {
   const [stickers, setStickers] = useState<Sticker[]>(() => loadStickers());
   const [stickerPickerOpen, setStickerPickerOpen] = useState(false);
   const [hotkeyEditorOpen, setHotkeyEditorOpen] = useState(false);
+  const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [activity, setActivity] = useState<ActivityItem[]>([]);
+
+  function pushActivity(item: Omit<ActivityItem, "id" | "ts">) {
+    setActivity((a) => [{ id: uid(), ts: Date.now(), ...item }, ...a].slice(0, 50));
+  }
   const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body?: string } | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total?: number } | null>(null);
@@ -303,6 +318,31 @@ export default function App() {
   const activeRoom = useMemo(() => rooms.find((r) => r.id === activeId) ?? null, [rooms, activeId]);
 
   useEffect(() => saveRooms(rooms), [rooms]);
+
+  // Hydrate messages from IndexedDB on mount. Older messages persist forever now.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const ids = rooms.map((r) => r.id);
+      for (const id of ids) {
+        try {
+          const msgs = await loadMessagesFromDb(id, 500);
+          if (cancelled) return;
+          if (msgs.length === 0) continue;
+          setRooms((rs) =>
+            rs.map((r) =>
+              r.id === id ? { ...r, messages: msgs as Msg[] } : r,
+            ),
+          );
+        } catch (e) {
+          console.warn("[db] hydrate failed for room", id, e);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+    // Only on mount — subsequent room additions hydrate from network sends.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => saveSettings(settings), [settings]);
   useEffect(() => saveStickersLs(stickers), [stickers]);
   useEffect(() => {
@@ -379,6 +419,18 @@ export default function App() {
       }
     })();
   }, [immersivePeerId]);
+
+  // Ctrl+K opens the command palette globally
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.ctrlKey && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        setCmdPaletteOpen((v) => !v);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Keyboard shortcuts for immersive mode:
   // - Ctrl+Shift+M  → toggle immersive on the first remote stream in the active room
@@ -550,9 +602,31 @@ export default function App() {
     }
   }
 
-  // Stable updateRoom helper
+  // Stable updateRoom helper. Detects added messages and writes them to IndexedDB
+  // for permanent storage (so they survive restarts and aren't capped by localStorage).
   const updateRoom = useCallback((id: string, fn: (r: Room) => Room) => {
-    setRooms((rs) => rs.map((r) => (r.id === id ? fn(r) : r)));
+    setRooms((rs) =>
+      rs.map((r) => {
+        if (r.id !== id) return r;
+        const next = fn(r);
+        // Save any new messages to IDB asynchronously.
+        const oldIds = new Set(r.messages.map((m) => m.id));
+        for (const m of next.messages) {
+          if (!oldIds.has(m.id)) {
+            saveMessageToDb(id, {
+              id: m.id,
+              ts: m.ts,
+              author: m.author,
+              authorName: m.authorName,
+              text: m.text,
+              imageDataUrl: m.imageDataUrl,
+              replyTo: m.replyTo,
+            }).catch((e) => console.warn("[db] save failed", e));
+          }
+        }
+        return next;
+      }),
+    );
   }, []);
 
   function showToast(text: string, duration = 2500) {
@@ -672,6 +746,23 @@ export default function App() {
           peerRef.current?.broadcast(msg, fromPeerId);
         }
 
+        // Gemini AI: if I host this room and the text starts with @gemini, call the API
+        // on behalf of the requester and broadcast the answer.
+        if (msg.type === "text" && targetRoom.isHost && /^@gemini\b/i.test(msg.text)) {
+          const apiKey = settingsRef.current.geminiApiKey;
+          if (apiKey) {
+            handleGeminiRequest(msg.text.replace(/^@gemini\b/i, "").trim(), targetRoom);
+          }
+        }
+
+        const authorN = msg.fromName || targetRoom.memberNames[fromPeerId] || fromPeerId.slice(0, 8);
+        const previewT = (msg.type === "text" ? msg.text : "🖼 imagen").slice(0, 60);
+        pushActivity({
+          kind: "msg",
+          text: `${authorN}: ${previewT}`,
+          roomId: targetRoom.id,
+        });
+
         const isActiveAndFocused = activeIdRef.current === targetRoom.id && focusedRef.current;
         if (!isActiveAndFocused) {
           // Bump unread badge for this room
@@ -712,12 +803,17 @@ export default function App() {
       console.log("[peer] disconnected", peerId);
     };
 
+    let alreadyReady = false;
     const pm = new PeerManager(settings.myPeerId, settings.myName, {
       onReady: (id) => {
         setMyPeerId(id);
         setPeerReady(true);
         setSettings((s) => ({ ...s, myPeerId: id }));
-        showToast(`Tu código: ${id}`);
+        // Show the toast only the first time per session — silent on reconnects.
+        if (!alreadyReady) {
+          alreadyReady = true;
+          showToast("Conectado");
+        }
       },
       onConnect: handleConnect,
       onDisconnect: handleDisconnect,
@@ -732,6 +828,9 @@ export default function App() {
           next.set(fromPeerId, stream);
           return next;
         });
+        const r = roomsRef.current.find((r) => r.memberPeerIds.includes(fromPeerId));
+        const name = r?.memberNames[fromPeerId] ?? fromPeerId.slice(0, 8);
+        pushActivity({ kind: "share", text: `${name} comparte pantalla`, roomId: r?.id });
         // If the sender starts a fresh share, un-hide them so we see it.
         setHiddenStreamPeerIds((s) => {
           if (!s.has(fromPeerId)) return s;
@@ -760,6 +859,15 @@ export default function App() {
         setRemoteVoiceStreams((m) => {
           const next = new Map(m);
           next.delete(fromPeerId);
+          // Auto-leave if no other voices remain — covers 1-on-1 (other hangs up)
+          // and group calls where we end up alone.
+          if (next.size === 0 && voiceActiveRef.current) {
+            setTimeout(() => {
+              if (voiceActiveRef.current && peerRef.current?.isVoiceActive()) {
+                endCallLocal("Te quedaste solo · llamada finalizada");
+              }
+            }, 400);
+          }
           return next;
         });
       },
@@ -771,6 +879,7 @@ export default function App() {
         setIncomingCall(info);
         setIncomingCallName(name);
         showToast(`${name} te está llamando`, 4000);
+        pushActivity({ kind: "voice", text: `${name} te está llamando` });
       },
       onRemoteCamera: (fromPeerId, stream) => {
         setRemoteCameraStreams((m) => {
@@ -892,6 +1001,61 @@ export default function App() {
   }, [peerReady]);
 
   // ===== Actions =====
+  async function handleGeminiRequest(prompt: string, room: Room) {
+    const apiKey = settingsRef.current.geminiApiKey;
+    if (!apiKey || !peerRef.current) return;
+    // Use last few messages as light context so Gemini understands the convo flow.
+    const ctx = room.messages.slice(-8).map((m) => {
+      const author = m.author === "me" ? "yo" : (m.authorName ?? room.memberNames[m.author as string] ?? "amigo");
+      return `${author}: ${m.text ?? "(imagen)"}`;
+    }).join("\n");
+    const fullPrompt = ctx ? `Contexto del chat:\n${ctx}\n\nPregunta:\n${prompt}` : prompt;
+    let reply = "";
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [{ parts: [{ text: fullPrompt }] }] }),
+        },
+      );
+      if (!res.ok) {
+        const errText = await res.text();
+        reply = `(error de Gemini: ${res.status}) ${errText.slice(0, 200)}`;
+      } else {
+        const data = await res.json();
+        reply = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "(sin respuesta)";
+      }
+    } catch (e: any) {
+      reply = `(error de red: ${e?.message ?? "desconocido"})`;
+    }
+    // Send Gemini's reply as a regular text message attributed to "Gemini".
+    const msgId = uid();
+    const ts = Date.now();
+    const wire: WireMsg = {
+      type: "text",
+      msgId,
+      from: "gemini-bot",
+      fromName: "🤖 Gemini",
+      text: reply,
+      ts,
+      toGroup: room.kind === "group" ? room.id : undefined,
+    };
+    // Show locally
+    updateRoom(room.id, (r) => ({
+      ...r,
+      messages: [...r.messages, { id: msgId, author: "gemini-bot", authorName: "🤖 Gemini", text: reply, ts }],
+    }));
+    // Broadcast
+    if (room.kind === "dm") {
+      const target = room.memberPeerIds[0];
+      if (target) peerRef.current.send(target, wire);
+    } else {
+      for (const pid of room.memberPeerIds) peerRef.current.send(pid, wire);
+    }
+  }
+
   function sendText() {
     if (!activeRoom || !peerRef.current) return;
     const text = draft.trim();
@@ -928,6 +1092,17 @@ export default function App() {
     setReplyingTo(null);
     setMentionState(null);
     inputRef.current?.focus();
+
+    // If I'm hosting this room and the message starts with @gemini, my own app
+    // calls the API (since I have the key) and broadcasts the response.
+    if (activeRoom.isHost && /^@gemini\b/i.test(text)) {
+      const apiKey = settings.geminiApiKey;
+      if (apiKey) {
+        handleGeminiRequest(text.replace(/^@gemini\b/i, "").trim(), activeRoom);
+      } else {
+        showToast("Configura tu API Key de Gemini en ⚙ primero");
+      }
+    }
   }
 
   function startReply(m: Msg) {
@@ -1234,12 +1409,13 @@ export default function App() {
   }
 
   function removeRoom(id: string) {
-    if (!confirm("¿Eliminar este chat?")) return;
+    if (!confirm("¿Eliminar este chat? También borrará todo el historial guardado.")) return;
     setRooms((rs) => {
       const next = rs.filter((r) => r.id !== id);
       if (activeId === id) setActiveId(next[0]?.id ?? "");
       return next;
     });
+    deleteRoomMessagesFromDb(id).catch((e) => console.warn("[db] delete failed", e));
   }
 
   function acceptRequest(peerId: string, name: string) {
@@ -1315,16 +1491,22 @@ export default function App() {
     window.addEventListener("mouseup", onUp);
   }
 
+  function endCallLocal(reason?: string) {
+    const pm = peerRef.current;
+    if (pm) pm.stopVoice();
+    setVoiceActive(false);
+    setMicMuted(false);
+    setCameraActive(false);
+    setLocalCameraStream(null);
+    setCallStartTs(null);
+    if (reason) showToast(reason);
+  }
+
   async function toggleVoiceCall() {
     if (!activeRoom || !peerRef.current) return;
     const pm = peerRef.current;
     if (pm.isVoiceActive()) {
-      pm.stopVoice();
-      setVoiceActive(false);
-      setMicMuted(false);
-      setCameraActive(false);
-      setLocalCameraStream(null);
-      showToast("Llamada finalizada");
+      endCallLocal("Llamada finalizada");
       return;
     }
     const targets = activeRoom.memberPeerIds.filter((pid) => pm.isConnected(pid));
@@ -1335,6 +1517,7 @@ export default function App() {
     try {
       await pm.startVoice(targets);
       setVoiceActive(true);
+      setCallStartTs(Date.now());
       showToast(`Llamando a ${targets.length}…`);
     } catch (e: any) {
       console.error(e);
@@ -1462,10 +1645,47 @@ export default function App() {
   const activeRequestName = activeRequestPeerId ? incomingRequests.get(activeRequestPeerId) ?? null : null;
 
   // ===== Render =====
+  const sidebarOn = !!settings.sidebarMode;
   return (
-    <div className={`app ${focused ? "focused" : "blurred"} ${immersivePeerId ? "immersive-mode" : ""}`}>
+    <div className={`app ${focused ? "focused" : "blurred"} ${immersivePeerId ? "immersive-mode" : ""} ${sidebarOn ? "with-sidebar" : ""}`}>
+      {sidebarOn && (
+        <aside className="sidebar">
+          <div className="sidebar-head">Chati</div>
+          <div className="sidebar-list">
+            {rooms.map((r) => {
+              const st = peerStatus(r.id);
+              const allOn = st.total > 0 && st.connected === st.total;
+              const u = unread[r.id] ?? 0;
+              return (
+                <button
+                  key={r.id}
+                  className={`sidebar-item ${r.id === activeId ? "active" : ""} ${u > 0 ? "has-unread" : ""}`}
+                  onClick={() => setActiveId(r.id)}
+                  onAuxClick={(e) => { if (e.button === 1) removeRoom(r.id); }}
+                  title={`${r.kind === "group" ? "Grupo · " : ""}${st.connected}/${st.total} conectados`}
+                >
+                  <span className={`dot ${allOn ? "on" : "off"}`} />
+                  <span className="sidebar-name">{r.name}</span>
+                  {u > 0 && <span className="unread-badge">{u > 9 ? "9+" : u}</span>}
+                </button>
+              );
+            })}
+            {[...incomingRequests.entries()].map(([peerId, name]) => (
+              <button
+                key={`req-${peerId}`}
+                className={`sidebar-item sidebar-request ${activeId === `req-${peerId}` ? "active" : ""}`}
+                onClick={() => setActiveId(`req-${peerId}`)}
+              >
+                <span className="dot pulse" />
+                <span className="sidebar-name">{name} ?</span>
+              </button>
+            ))}
+            <button className="sidebar-add" onClick={() => setNewRoomOpen(true)}>+ Nuevo</button>
+          </div>
+        </aside>
+      )}
       <header className="topbar" data-tauri-drag-region>
-        <div className="tabs">
+        {!sidebarOn && <div className="tabs">
           {rooms.map((r) => {
             const st = peerStatus(r.id);
             const allOn = st.total > 0 && st.connected === st.total;
@@ -1500,9 +1720,16 @@ export default function App() {
           {(rooms.length > 0 || incomingRequests.size > 0) && (
             <button className="tab tab-add" onClick={() => setNewRoomOpen(true)} title="Nuevo chat o grupo">+</button>
           )}
-        </div>
+        </div>}
+        {sidebarOn && activeRoom && (
+          <div className="topbar-title" data-tauri-drag-region>
+            {activeRoom.name}
+          </div>
+        )}
         <div className="topbar-spacer" data-tauri-drag-region title="Arrastra aquí para mover" />
         <div className="winctl">
+          <button className="winbtn" onClick={() => setActivityOpen((v) => !v)} title="Actividad reciente">🔔</button>
+          <button className="winbtn" onClick={() => setCmdPaletteOpen(true)} title="Buscador (Ctrl+K)">⌕</button>
           <button className="winbtn" onClick={() => setSettingsOpen((s) => !s)} title="Ajustes">⚙</button>
           <button className="winbtn" onClick={hideWindow} title="Ocultar (Ctrl+Shift+H para volver)">–</button>
           <button className="winbtn winclose" onClick={closeWindow} title="Cerrar">×</button>
@@ -1920,6 +2147,38 @@ export default function App() {
           </label>
 
           <hr />
+          <div className="section-title">Layout</div>
+          <label className="row toggle">
+            <span title="Lista de chats en barra vertical lateral (en lugar de pestañas arriba)">
+              Sidebar vertical
+            </span>
+            <input
+              type="checkbox"
+              checked={!!settings.sidebarMode}
+              onChange={(e) => setSettings((s) => ({ ...s, sidebarMode: e.target.checked }))}
+            />
+          </label>
+
+          <hr />
+          <div className="section-title">Asistente AI (Gemini)</div>
+          <div className="hint" style={{ textAlign: "left", marginBottom: 4 }}>
+            Si pegas tu API Key de Google AI, cualquier miembro del chat podrá invocar a Gemini escribiendo <code>@gemini</code> al inicio del mensaje. La respuesta se ve para todos.
+          </div>
+          <label className="row">
+            <span>API Key</span>
+            <input
+              type="password"
+              className="thininput"
+              value={settings.geminiApiKey ?? ""}
+              onChange={(e) => setSettings((s) => ({ ...s, geminiApiKey: e.target.value }))}
+              placeholder="AIza…"
+            />
+          </label>
+          {settings.geminiApiKey && (
+            <div className="hint" style={{ color: "#8ee9ad" }}>✓ Activo en tus chats donde seas host</div>
+          )}
+
+          <hr />
           <div className="section-title">Conexión</div>
           <div className="row">
             <span>Estado</span>
@@ -1985,6 +2244,34 @@ export default function App() {
       {joinOpen && (
         <JoinModal onClose={() => setJoinOpen(false)} onJoin={joinByCode} />
       )}
+
+      {/* Floating call popup with timer + hangup */}
+      {voiceActive && activeRoom && (() => {
+        const peersInCall = activeRoom.memberPeerIds.filter((pid) => peerRef.current?.isConnected(pid));
+        const names = peersInCall.map((pid) => activeRoom.memberNames[pid] ?? pid.slice(0, 8));
+        const elapsedMs = callStartTs ? Date.now() - callStartTs : 0;
+        const mins = Math.floor(elapsedMs / 60000);
+        const secs = Math.floor((elapsedMs % 60000) / 1000);
+        const time = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+        const _ = callTick; // ensure re-render on tick
+        void _;
+        return (
+          <div className="call-popup">
+            <span className="call-popup-dot" />
+            <span className="call-popup-text">
+              Llamada con <b>{names.join(", ") || "(esperando)"}</b>
+            </span>
+            <span className="call-popup-time">{time}</span>
+            <button
+              className="call-popup-hangup"
+              onClick={() => endCallLocal("Llamada finalizada")}
+              title="Colgar"
+            >
+              <Icon name="phone-off" size={13} />
+            </button>
+          </div>
+        );
+      })()}
 
       {immersivePeerId && remoteStreams.has(immersivePeerId) && !hiddenStreamPeerIds.has(immersivePeerId) && (
         <div className="immersive-overlay">
@@ -2126,6 +2413,34 @@ export default function App() {
           current={settings.toggleShortcut ?? "Ctrl+Shift+H"}
           onSave={applyNewShortcut}
           onClose={() => setHotkeyEditorOpen(false)}
+        />
+      )}
+
+      {cmdPaletteOpen && (
+        <CommandPalette
+          rooms={rooms}
+          onClose={() => setCmdPaletteOpen(false)}
+          onPickRoom={(id) => { setActiveId(id); setCmdPaletteOpen(false); }}
+          onCommand={(cmd) => {
+            setCmdPaletteOpen(false);
+            switch (cmd) {
+              case "settings": setSettingsOpen(true); break;
+              case "newchat": setNewRoomOpen(true); break;
+              case "reconnect": forceReconnectAll(); break;
+              case "sidebar": setSettings((s) => ({ ...s, sidebarMode: !s.sidebarMode })); break;
+              case "update": manualCheck(); break;
+              case "hide": hideWindow(); break;
+            }
+          }}
+        />
+      )}
+
+      {activityOpen && (
+        <ActivityFeed
+          items={activity}
+          rooms={rooms}
+          onPickRoom={(id) => { setActiveId(id); setActivityOpen(false); }}
+          onClose={() => setActivityOpen(false)}
         />
       )}
 
@@ -2514,6 +2829,138 @@ function YouTubePlayer({
           {isHost && <button className="rv-btn" onClick={onClose}>cerrar para todos</button>}
           {!isHost && <button className="rv-btn" onClick={onClose}>cerrar (solo mío)</button>}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function CommandPalette({
+  rooms,
+  onClose,
+  onPickRoom,
+  onCommand,
+}: {
+  rooms: Room[];
+  onClose: () => void;
+  onPickRoom: (id: string) => void;
+  onCommand: (cmd: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [sel, setSel] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  type Result = { kind: "room" | "msg" | "cmd"; id: string; label: string };
+  const commands: Result[] = [
+    { kind: "cmd", id: "newchat", label: "+ Nuevo chat o grupo" },
+    { kind: "cmd", id: "settings", label: "⚙ Abrir ajustes" },
+    { kind: "cmd", id: "reconnect", label: "🔄 Reconectar a contactos" },
+    { kind: "cmd", id: "sidebar", label: "↔ Cambiar layout (tabs / sidebar)" },
+    { kind: "cmd", id: "update", label: "⬇ Buscar nueva versión" },
+    { kind: "cmd", id: "hide", label: "👻 Ocultar ventana (Ctrl+Shift+H)" },
+  ];
+  const q = query.toLowerCase();
+  const roomMatches: Result[] = rooms
+    .filter((r) => r.name.toLowerCase().includes(q))
+    .slice(0, 6)
+    .map((r) => ({ kind: "room", id: r.id, label: `💬 ${r.name}` }));
+  const msgMatches: Result[] = q.length > 1
+    ? rooms.flatMap((r) =>
+        r.messages
+          .filter((m) => m.text && m.text.toLowerCase().includes(q))
+          .slice(-5)
+          .map((m) => ({
+            kind: "msg" as const,
+            id: r.id,
+            label: `🔍 [${r.name}] ${(m.text ?? "").slice(0, 60)}`,
+          })),
+      ).slice(0, 6)
+    : [];
+  const cmdMatches: Result[] = commands.filter((c) => c.label.toLowerCase().includes(q));
+  const results: Result[] = [...roomMatches, ...msgMatches, ...cmdMatches];
+
+  function activate(i: number) {
+    const r = results[i];
+    if (!r) return;
+    if (r.kind === "room" || r.kind === "msg") onPickRoom(r.id);
+    else onCommand(r.id);
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal cmd-palette" onClick={(e) => e.stopPropagation()}>
+        <input
+          ref={inputRef}
+          className="cmd-input"
+          placeholder="Buscar chats, mensajes o comandos…  (Ctrl+K)"
+          value={query}
+          onChange={(e) => { setQuery(e.target.value); setSel(0); }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") { e.preventDefault(); setSel((s) => Math.min(s + 1, results.length - 1)); }
+            else if (e.key === "ArrowUp") { e.preventDefault(); setSel((s) => Math.max(0, s - 1)); }
+            else if (e.key === "Enter") { e.preventDefault(); activate(sel); }
+            else if (e.key === "Escape") { e.preventDefault(); onClose(); }
+          }}
+        />
+        <div className="cmd-results">
+          {results.length === 0 && <div className="cmd-empty">Sin resultados</div>}
+          {results.map((r, i) => (
+            <button
+              key={`${r.kind}-${r.id}-${i}`}
+              className={`cmd-result ${i === sel ? "selected" : ""}`}
+              onMouseEnter={() => setSel(i)}
+              onClick={() => activate(i)}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ActivityFeed({
+  items,
+  rooms,
+  onPickRoom,
+  onClose,
+}: {
+  items: ActivityItem[];
+  rooms: Room[];
+  onPickRoom: (id: string) => void;
+  onClose: () => void;
+}) {
+  function timeAgo(ts: number) {
+    const s = Math.floor((Date.now() - ts) / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h`;
+    return `${Math.floor(h / 24)}d`;
+  }
+  return (
+    <div className="activity-panel" onClick={(e) => e.stopPropagation()}>
+      <div className="activity-head">
+        <span>Actividad</span>
+        <button className="winbtn" onClick={onClose}>×</button>
+      </div>
+      <div className="activity-list">
+        {items.length === 0 && <div className="cmd-empty">Sin actividad reciente</div>}
+        {items.map((it) => {
+          const room = it.roomId ? rooms.find((r) => r.id === it.roomId) : null;
+          return (
+            <button
+              key={it.id}
+              className={`activity-item activity-${it.kind}`}
+              onClick={() => { if (room) onPickRoom(room.id); else onClose(); }}
+            >
+              <div className="activity-text">{it.text}</div>
+              <div className="activity-meta">{timeAgo(it.ts)}{room ? ` · ${room.name}` : ""}</div>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
