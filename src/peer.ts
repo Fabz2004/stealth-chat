@@ -11,6 +11,14 @@ export type WireMsg =
   | { type: "music-state"; playing: boolean; positionSec: number; ts: number; toGroup?: string }
   | { type: "music-close"; toGroup?: string; ts: number };
 
+export type IncomingVoiceCall = {
+  peerId: string;
+  /** Accept the call. If a stream is provided, the other side will hear it. */
+  accept: (myStream?: MediaStream) => void;
+  /** Reject and close the call. */
+  reject: () => void;
+};
+
 export type PeerEvents = {
   onReady: (myId: string) => void;
   onConnect: (peerId: string) => void;
@@ -19,8 +27,11 @@ export type PeerEvents = {
   onError: (err: Error) => void;
   onRemoteStream: (fromPeerId: string, stream: MediaStream) => void;
   onRemoteStreamEnded: (fromPeerId: string) => void;
+  onIncomingVoiceCall: (info: IncomingVoiceCall) => void;
   onRemoteVoice: (fromPeerId: string, stream: MediaStream) => void;
   onRemoteVoiceEnded: (fromPeerId: string) => void;
+  onRemoteCamera: (fromPeerId: string, stream: MediaStream) => void;
+  onRemoteCameraEnded: (fromPeerId: string) => void;
 };
 
 export class PeerManager {
@@ -34,6 +45,10 @@ export class PeerManager {
   // Voice call state — separate from screen share so they can run independently
   private voiceStream?: MediaStream;
   private voiceCalls: Map<string, MediaConnection> = new Map();
+  // Camera state — webcam shared during a voice call
+  private cameraStream?: MediaStream;
+  private cameraCalls: Map<string, MediaConnection> = new Map();
+  private incomingCameraCalls: Map<string, MediaConnection> = new Map();
   private events: PeerEvents;
   private ready = false;
   private pendingConnects: { peerId: string; resolve: () => void; reject: (e: Error) => void }[] = [];
@@ -64,26 +79,55 @@ export class PeerManager {
     this.peer.on("connection", (conn) => this.setupConnection(conn));
 
     this.peer.on("call", (call) => {
-      const kind: "voice" | "screen" =
-        (call.metadata && (call.metadata as { kind?: string }).kind === "voice") ? "voice" : "screen";
+      const kindMeta = (call.metadata && (call.metadata as { kind?: string }).kind) || "screen";
 
-      if (kind === "voice") {
-        // Bidirectional: answer with our voice stream so the other side hears us.
-        // If our mic isn't on yet, answer silently — they'll hear us when we toggle on.
-        call.answer(this.voiceStream);
-        this.voiceCalls.set(call.peer, call);
-        call.on("stream", (remoteStream) => {
-          this.events.onRemoteVoice(call.peer, remoteStream);
-        });
-        call.on("close", () => {
-          this.voiceCalls.delete(call.peer);
-          this.events.onRemoteVoiceEnded(call.peer);
-        });
-        call.on("error", (err) => {
-          console.error("[peer] voice call error", err);
-          this.voiceCalls.delete(call.peer);
-          this.events.onRemoteVoiceEnded(call.peer);
-        });
+      if (kindMeta === "voice") {
+        // Notify app — user has to accept or reject. The call stays open until they decide.
+        const accept = (myStream?: MediaStream) => {
+          try {
+            call.answer(myStream);
+            this.voiceCalls.set(call.peer, call);
+            call.on("stream", (remoteStream) => {
+              this.events.onRemoteVoice(call.peer, remoteStream);
+            });
+            call.on("close", () => {
+              this.voiceCalls.delete(call.peer);
+              this.events.onRemoteVoiceEnded(call.peer);
+            });
+            call.on("error", (err) => {
+              console.error("[peer] voice call error", err);
+              this.voiceCalls.delete(call.peer);
+              this.events.onRemoteVoiceEnded(call.peer);
+            });
+          } catch (e) {
+            console.error("[peer] accept voice call failed", e);
+          }
+        };
+        const reject = () => {
+          try { call.close(); } catch { /* ignore */ }
+        };
+        this.events.onIncomingVoiceCall({ peerId: call.peer, accept, reject });
+      } else if (kindMeta === "video") {
+        // Auto-accept incoming camera streams from peers we're in a voice call with.
+        if (this.voiceCalls.has(call.peer)) {
+          call.answer();
+          this.incomingCameraCalls.set(call.peer, call);
+          call.on("stream", (remoteStream) => {
+            this.events.onRemoteCamera(call.peer, remoteStream);
+          });
+          call.on("close", () => {
+            this.incomingCameraCalls.delete(call.peer);
+            this.events.onRemoteCameraEnded(call.peer);
+          });
+          call.on("error", (err) => {
+            console.error("[peer] incoming camera call error", err);
+            this.incomingCameraCalls.delete(call.peer);
+            this.events.onRemoteCameraEnded(call.peer);
+          });
+        } else {
+          // Not in a call → drop the video to avoid surprise webcam streams.
+          try { call.close(); } catch { /* ignore */ }
+        }
       } else {
         // Screen share: one-way watch (no outbound stream).
         call.answer();
@@ -304,13 +348,18 @@ export class PeerManager {
 
   // ===== Voice (mic) calls =====
 
-  async startVoice(peerIds: string[]): Promise<void> {
-    if (this.voiceStream) return;
+  /** Ensure our mic is captured. Returns the stream so callers can pass it to call.answer(). */
+  async ensureVoiceStream(): Promise<MediaStream> {
+    if (this.voiceStream) return this.voiceStream;
     this.voiceStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       video: false,
     });
-    // Call every peer in the room with our voice stream.
+    return this.voiceStream;
+  }
+
+  async startVoice(peerIds: string[]): Promise<void> {
+    await this.ensureVoiceStream();
     for (const pid of peerIds) {
       this.placeVoiceCall(pid);
     }
@@ -340,6 +389,7 @@ export class PeerManager {
   }
 
   stopVoice() {
+    this.stopCamera();  // camera depends on a voice call being active
     for (const call of this.voiceCalls.values()) {
       try { call.close(); } catch { /* ignore */ }
     }
@@ -350,6 +400,60 @@ export class PeerManager {
       }
       this.voiceStream = undefined;
     }
+  }
+
+  // ===== Camera (during voice call) =====
+
+  async startCamera(peerIds: string[]): Promise<MediaStream> {
+    if (this.cameraStream) return this.cameraStream;
+    this.cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } } as MediaTrackConstraints,
+      audio: false,
+    });
+    // Auto-stop everything if the camera track ends (user revokes, device disconnect)
+    const track = this.cameraStream.getVideoTracks()[0];
+    if (track) track.addEventListener("ended", () => this.stopCamera());
+    for (const pid of peerIds) {
+      this.placeCameraCall(pid);
+    }
+    return this.cameraStream;
+  }
+
+  placeCameraCall(peerId: string) {
+    if (!this.cameraStream) return;
+    if (this.cameraCalls.has(peerId)) return;
+    try {
+      const call = this.peer.call(peerId, this.cameraStream, { metadata: { kind: "video" } });
+      this.cameraCalls.set(peerId, call);
+      call.on("close", () => this.cameraCalls.delete(peerId));
+      call.on("error", (e) => {
+        console.error("[peer] outgoing camera call error", e);
+        this.cameraCalls.delete(peerId);
+      });
+    } catch (e) {
+      console.error(`[peer] failed to place camera call to ${peerId}`, e);
+    }
+  }
+
+  stopCamera() {
+    for (const call of this.cameraCalls.values()) {
+      try { call.close(); } catch { /* ignore */ }
+    }
+    this.cameraCalls.clear();
+    if (this.cameraStream) {
+      for (const t of this.cameraStream.getTracks()) {
+        try { t.stop(); } catch { /* ignore */ }
+      }
+      this.cameraStream = undefined;
+    }
+  }
+
+  getLocalCameraStream(): MediaStream | undefined {
+    return this.cameraStream;
+  }
+
+  isCameraActive(): boolean {
+    return !!this.cameraStream;
   }
 
   isVoiceActive(): boolean {
@@ -366,6 +470,7 @@ export class PeerManager {
   destroy() {
     this.stopScreenShare();
     this.stopVoice();
+    this.stopCamera();
     try { this.peer.destroy(); } catch { /* ignore */ }
   }
 }

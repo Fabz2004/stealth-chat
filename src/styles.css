@@ -117,6 +117,58 @@ input, textarea {
 .tab.tab-request { color: #f3b13e; }
 .tab.tab-request.active { background: rgba(243, 177, 62, 0.15); }
 
+.unread-badge {
+  background: var(--accent);
+  color: white;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 9px;
+  min-width: 14px;
+  text-align: center;
+  line-height: 1.2;
+  margin-left: 2px;
+}
+.tab.has-unread:not(.active) { opacity: 1; font-weight: 600; }
+
+/* ===== Floating mini-message ribbon (incoming msg notification) ===== */
+.msg-notif {
+  position: absolute;
+  top: calc(var(--topbar-h) + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(20, 22, 30, 0.95);
+  border: 1px solid var(--accent);
+  border-left-width: 3px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 11px;
+  color: var(--font-color);
+  cursor: pointer;
+  z-index: 32;
+  max-width: 80%;
+  min-width: 180px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  animation: notif-slide-in 0.2s ease-out;
+}
+
+@keyframes notif-slide-in {
+  from { transform: translate(-50%, -120%); opacity: 0; }
+  to   { transform: translate(-50%, 0); opacity: 1; }
+}
+
+.msg-notif:hover { background: rgba(30, 34, 44, 0.98); }
+.msg-notif-author { font-weight: 700; color: var(--accent); }
+.msg-notif-preview {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.9;
+}
+
 .winctl { display: flex; gap: 2px; }
 
 .winbtn {
@@ -392,23 +444,81 @@ input, textarea {
 
 .iconbtn:hover { background: rgba(255, 255, 255, 0.06); opacity: 1; }
 .iconbtn:disabled { opacity: 0.35; cursor: not-allowed; }
-.iconbtn.send { font-weight: bold; }
 .iconbtn.send:hover { background: rgba(255, 255, 255, 0.08); }
-.iconbtn.sharing { background: rgba(217, 83, 79, 0.18); border-color: rgba(217, 83, 79, 0.4); color: #ff8a86; }
-.iconbtn.sharing:hover { background: rgba(217, 83, 79, 0.28); }
 
-.iconbtn.voice-active {
-  background: rgba(62, 196, 122, 0.18);
-  border-color: rgba(62, 196, 122, 0.4);
-  color: #6ee79a;
+/* Active/toggled state: subtle darker background, no colored tint. */
+.iconbtn.is-on {
+  background: rgba(255, 255, 255, 0.10);
+  border-color: rgba(255, 255, 255, 0.18);
 }
-.iconbtn.voice-active:hover { background: rgba(62, 196, 122, 0.28); }
+.iconbtn.is-on:hover { background: rgba(255, 255, 255, 0.14); }
 
-.iconbtn.mic-muted {
-  background: rgba(217, 83, 79, 0.18);
-  border-color: rgba(217, 83, 79, 0.4);
-  color: #ff8a86;
+.iconbtn svg { display: block; }
+
+/* ===== Call tiles (camera grid) ===== */
+.call-tiles {
+  position: absolute;
+  top: calc(var(--topbar-h) + 6px);
+  right: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 22;
+  max-width: 30%;
 }
+
+.call-tile {
+  position: relative;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  width: 140px;
+  aspect-ratio: 4 / 3;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.call-tile video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.call-tile-label {
+  position: absolute;
+  bottom: 3px;
+  left: 4px;
+  font-size: 9px;
+  background: rgba(0, 0, 0, 0.65);
+  color: white;
+  padding: 1px 5px;
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.call-tile-self { border-color: var(--accent); }
+
+/* ===== Incoming call modal ===== */
+.call-incoming {
+  text-align: center;
+  align-items: center;
+  width: min(280px, 80%);
+}
+.call-incoming-icon {
+  font-size: 36px;
+  margin: 4px 0;
+  animation: pulse-ring 1.4s ease-in-out infinite;
+}
+@keyframes pulse-ring {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.1); }
+}
+.call-incoming-title { font-size: 13px; opacity: 0.9; }
+.call-incoming .modal-actions { justify-content: center; gap: 8px; margin-top: 6px; }
+.call-accept { background: #3ec47a !important; border-color: #3ec47a !important; }
+.call-accept:hover { filter: brightness(1.1); }
+.call-reject:hover { background: rgba(217, 83, 79, 0.2); color: #ff8a86; }
 
 /* ===== Split layout when remote screen share is active ===== */
 .split-content {

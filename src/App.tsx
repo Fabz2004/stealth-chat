@@ -7,7 +7,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
-import { PeerManager, WireMsg, ReplyRef } from "./peer";
+import { PeerManager, WireMsg, ReplyRef, IncomingVoiceCall } from "./peer";
 
 type RoomKind = "dm" | "group";
 
@@ -67,13 +67,28 @@ const DEFAULT_SETTINGS: AppSettings = {
 };
 
 // Subtle generated chime — no asset needed. Two short pure tones, total ~280ms.
+// We keep one long-lived AudioContext to avoid the "user gesture required" lockouts
+// that hit new AudioContexts in some webview/browser policy combinations.
+let sharedAudioCtx: AudioContext | null = null;
+function getAudioCtx(): AudioContext | null {
+  try {
+    if (sharedAudioCtx) return sharedAudioCtx;
+    const AC = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AC) return null;
+    sharedAudioCtx = new AC();
+    return sharedAudioCtx;
+  } catch {
+    return null;
+  }
+}
 function playNotifSound() {
   try {
-    const AC = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AC) return;
-    const ctx = new AC();
+    const ctx = getAudioCtx();
+    if (!ctx) return;
+    // Resume if suspended (some webviews start contexts suspended until first gesture).
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
     const now = ctx.currentTime;
-    const beep = (start: number, freq: number, dur: number, peak = 0.08) => {
+    const beep = (start: number, freq: number, dur: number, peak = 0.18) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = "sine";
@@ -87,7 +102,6 @@ function playNotifSound() {
     };
     beep(now, 880, 0.12);
     beep(now + 0.13, 1175, 0.16);
-    setTimeout(() => ctx.close().catch(() => {}), 500);
   } catch (e) {
     console.warn("[notif] sound failed", e);
   }
@@ -99,6 +113,42 @@ const LS_ACTIVE = "sc.activeId";
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
+}
+
+// ===== Inline SVG icons (monochrome, currentColor) =====
+// Stroked line-art icons in the Lucide style. Single-color, scalable, no emoji color.
+const ICON_PROPS = {
+  viewBox: "0 0 24 24",
+  fill: "none" as const,
+  stroke: "currentColor",
+  strokeWidth: 2,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+};
+
+function Icon({ name, size = 16 }: { name: string; size?: number }) {
+  const paths: Record<string, React.ReactElement> = {
+    phone: <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.97.37 1.92.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.89.33 1.84.57 2.81.7A2 2 0 0 1 22 16.92Z"/>,
+    "phone-off": <><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-3.4-2.85"/><path d="M5.27 5.27A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.97.37 1.92.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91"/><line x1="22" y1="2" x2="2" y2="22"/></>,
+    mic: <><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10a7 7 0 0 1-14 0"/><line x1="12" y1="17" x2="12" y2="22"/></>,
+    "mic-off": <><line x1="2" y1="2" x2="22" y2="22"/><path d="M9 5a3 3 0 0 1 6 0v6"/><path d="M9 9v2a3 3 0 0 0 5.12 2.12"/><path d="M19 10a7 7 0 0 1-.11 1.23"/><path d="M17.94 17.94A7 7 0 0 1 5 10"/><line x1="12" y1="17" x2="12" y2="22"/></>,
+    cam: <><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></>,
+    "cam-off": <><line x1="2" y1="2" x2="22" y2="22"/><path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h3l3 3"/><path d="M9 5h5a2 2 0 0 1 2 2v5l4 4V7l-7 5"/></>,
+    image: <><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></>,
+    monitor: <><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></>,
+    "monitor-off": <><line x1="2" y1="2" x2="22" y2="22"/><path d="M8 21h8"/><path d="M12 17v4"/><path d="M20.4 15.4A2 2 0 0 1 19 17H5a2 2 0 0 1-2-2V5a2 2 0 0 1 1.6-1.96"/><path d="M8 3h13a2 2 0 0 1 2 2v8.5"/></>,
+    music: <><path d="M9 17V5l11-2v12"/><circle cx="6" cy="17" r="3"/><circle cx="17" cy="15" r="3"/></>,
+    send: <><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></>,
+    settings: <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.36.16.69.41.95.73.27.31.46.69.56 1.09v.18a2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1Z"/></>,
+    minimize: <line x1="5" y1="12" x2="19" y2="12"/>,
+    x: <><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></>,
+    reply: <><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></>,
+  };
+  return (
+    <svg width={size} height={size} {...ICON_PROPS}>
+      {paths[name]}
+    </svg>
+  );
 }
 
 function loadRooms(): Room[] {
@@ -161,10 +211,22 @@ export default function App() {
   const [immersiveChatOpen, setImmersiveChatOpen] = useState(false);
   // Image being viewed full-window in a lightbox (data URL), or null.
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  // Per-room unread counts. Cleared when the room becomes active or is opened.
+  const [unread, setUnread] = useState<Record<string, number>>({});
+  // Floating notification (mini-message ribbon) shown for new incoming messages.
+  const [msgNotif, setMsgNotif] = useState<{ author: string; preview: string; roomId: string; ts: number } | null>(null);
+  const msgNotifTimer = useRef<number | null>(null);
   // Voice call state
   const [voiceActive, setVoiceActive] = useState(false);
   const [micMuted, setMicMuted] = useState(false);
   const [remoteVoiceStreams, setRemoteVoiceStreams] = useState<Map<string, MediaStream>>(new Map());
+  // Incoming voice call awaiting accept/reject
+  const [incomingCall, setIncomingCall] = useState<IncomingVoiceCall | null>(null);
+  const [incomingCallName, setIncomingCallName] = useState<string>("");
+  // Camera state
+  const [cameraActive, setCameraActive] = useState(false);
+  const [localCameraStream, setLocalCameraStream] = useState<MediaStream | null>(null);
+  const [remoteCameraStreams, setRemoteCameraStreams] = useState<Map<string, MediaStream>>(new Map());
   // Reply state — when set, the next outgoing message will quote this one.
   const [replyingTo, setReplyingTo] = useState<ReplyRef | null>(null);
   // @ mention autocomplete state
@@ -196,7 +258,19 @@ export default function App() {
   useEffect(() => saveSettings(settings), [settings]);
   useEffect(() => {
     if (activeId) localStorage.setItem(LS_ACTIVE, activeId);
+    // Mark the now-active room as read
+    if (activeId) {
+      setUnread((u) => {
+        if (!u[activeId]) return u;
+        const next = { ...u };
+        delete next[activeId];
+        return next;
+      });
+    }
   }, [activeId]);
+
+  const activeIdRef = useRef(activeId);
+  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
 
   // CSS vars
   useEffect(() => {
@@ -510,9 +584,21 @@ export default function App() {
           peerRef.current?.broadcast(msg, fromPeerId);
         }
 
-        // Subtle notification if the window isn't focused (hidden, minimized, in background).
-        if (!focusedRef.current && settingsRef.current.notifSound) {
-          playNotifSound();
+        const isActiveAndFocused = activeIdRef.current === targetRoom.id && focusedRef.current;
+        if (!isActiveAndFocused) {
+          // Bump unread badge for this room
+          setUnread((u) => ({ ...u, [targetRoom.id]: (u[targetRoom.id] ?? 0) + 1 }));
+          // Floating mini-message ribbon at top of window
+          const preview = (msg.type === "text" ? msg.text : "🖼 imagen") ?? "";
+          const author =
+            msg.fromName
+            || targetRoom.memberNames[fromPeerId]
+            || fromPeerId.slice(0, 8);
+          setMsgNotif({ author, preview: preview.slice(0, 80), roomId: targetRoom.id, ts: Date.now() });
+          if (msgNotifTimer.current) window.clearTimeout(msgNotifTimer.current);
+          msgNotifTimer.current = window.setTimeout(() => setMsgNotif(null), 4500);
+          // Subtle chime
+          if (settingsRef.current.notifSound) playNotifSound();
         }
       }
     };
@@ -584,6 +670,29 @@ export default function App() {
       },
       onRemoteVoiceEnded: (fromPeerId) => {
         setRemoteVoiceStreams((m) => {
+          const next = new Map(m);
+          next.delete(fromPeerId);
+          return next;
+        });
+      },
+      onIncomingVoiceCall: (info) => {
+        // Find friendly name for this caller from any room we share
+        const name =
+          roomsRef.current.find((r) => r.memberPeerIds.includes(info.peerId))?.memberNames[info.peerId]
+          ?? info.peerId.slice(0, 8);
+        setIncomingCall(info);
+        setIncomingCallName(name);
+        showToast(`${name} te está llamando`, 4000);
+      },
+      onRemoteCamera: (fromPeerId, stream) => {
+        setRemoteCameraStreams((m) => {
+          const next = new Map(m);
+          next.set(fromPeerId, stream);
+          return next;
+        });
+      },
+      onRemoteCameraEnded: (fromPeerId) => {
+        setRemoteCameraStreams((m) => {
           const next = new Map(m);
           next.delete(fromPeerId);
           return next;
@@ -1031,6 +1140,8 @@ export default function App() {
       pm.stopVoice();
       setVoiceActive(false);
       setMicMuted(false);
+      setCameraActive(false);
+      setLocalCameraStream(null);
       showToast("Llamada finalizada");
       return;
     }
@@ -1042,7 +1153,7 @@ export default function App() {
     try {
       await pm.startVoice(targets);
       setVoiceActive(true);
-      showToast(`En llamada con ${targets.length}`);
+      showToast(`Llamando a ${targets.length}…`);
     } catch (e: any) {
       console.error(e);
       if (e?.name === "NotAllowedError") {
@@ -1061,15 +1172,72 @@ export default function App() {
     showToast(next ? "Mic silenciado" : "Mic encendido");
   }
 
+  async function acceptIncomingCall() {
+    if (!incomingCall || !peerRef.current) return;
+    try {
+      const myStream = await peerRef.current.ensureVoiceStream();
+      incomingCall.accept(myStream);
+      setVoiceActive(true);
+      setIncomingCall(null);
+      showToast("En llamada");
+    } catch (e: any) {
+      console.error(e);
+      if (e?.name === "NotAllowedError") {
+        showToast("Permiso de micrófono denegado");
+      } else {
+        showToast(`No se pudo aceptar: ${e?.message ?? "error"}`);
+      }
+      incomingCall.reject();
+      setIncomingCall(null);
+    }
+  }
+
+  function rejectIncomingCall() {
+    incomingCall?.reject();
+    setIncomingCall(null);
+    showToast("Llamada rechazada");
+  }
+
+  async function toggleCamera() {
+    if (!activeRoom || !peerRef.current) return;
+    const pm = peerRef.current;
+    if (pm.isCameraActive()) {
+      pm.stopCamera();
+      setCameraActive(false);
+      setLocalCameraStream(null);
+      return;
+    }
+    if (!voiceActive) {
+      showToast("Inicia la llamada primero");
+      return;
+    }
+    const targets = activeRoom.memberPeerIds.filter((pid) => pm.isConnected(pid));
+    try {
+      const stream = await pm.startCamera(targets);
+      setCameraActive(true);
+      setLocalCameraStream(stream);
+    } catch (e: any) {
+      console.error(e);
+      if (e?.name === "NotAllowedError") {
+        showToast("Permiso de cámara denegado");
+      } else {
+        showToast(`Error con la cámara: ${e?.message ?? "error"}`);
+      }
+    }
+  }
+
   // When a new peer connects to a room where we're already in a voice call,
   // automatically include them in the call.
   useEffect(() => {
     if (!voiceActive || !peerRef.current || !activeRoom) return;
     const pm = peerRef.current;
     for (const pid of activeRoom.memberPeerIds) {
-      if (pm.isConnected(pid)) pm.placeVoiceCall(pid);
+      if (pm.isConnected(pid)) {
+        pm.placeVoiceCall(pid);
+        if (cameraActive) pm.placeCameraCall(pid);
+      }
     }
-  }, [voiceActive, activeRoom, rooms]);
+  }, [voiceActive, cameraActive, activeRoom, rooms]);
 
   async function toggleScreenShare() {
     if (!activeRoom || !peerRef.current) return;
@@ -1119,10 +1287,11 @@ export default function App() {
           {rooms.map((r) => {
             const st = peerStatus(r.id);
             const allOn = st.total > 0 && st.connected === st.total;
+            const u = unread[r.id] ?? 0;
             return (
               <button
                 key={r.id}
-                className={`tab ${r.id === activeId ? "active" : ""}`}
+                className={`tab ${r.id === activeId ? "active" : ""} ${u > 0 ? "has-unread" : ""}`}
                 onMouseDown={tabDragHandler}
                 onClick={() => setActiveId(r.id)}
                 onAuxClick={(e) => { if (e.button === 1) removeRoom(r.id); }}
@@ -1130,6 +1299,7 @@ export default function App() {
               >
                 <span className={`dot ${allOn ? "on" : "off"}`} />
                 <span className="tab-name">{r.name}</span>
+                {u > 0 && <span className="unread-badge">{u > 9 ? "9+" : u}</span>}
               </button>
             );
           })}
@@ -1313,22 +1483,24 @@ export default function App() {
           })()}
 
           <footer className="composer">
-            <button className="iconbtn" onClick={attachImage} title="Adjuntar imagen" disabled={!peerReady}>🖼</button>
+            <button className="iconbtn" onClick={attachImage} title="Adjuntar imagen" disabled={!peerReady}>
+              <Icon name="image" />
+            </button>
             <button
-              className={`iconbtn ${isSharing ? "sharing" : ""}`}
+              className={`iconbtn ${isSharing ? "is-on" : ""}`}
               onClick={toggleScreenShare}
               title={isSharing ? "Dejar de compartir pantalla" : "Compartir pantalla (con audio del sistema)"}
               disabled={!peerReady}
             >
-              {isSharing ? "■" : "🖥"}
+              <Icon name={isSharing ? "monitor-off" : "monitor"} />
             </button>
             <button
-              className={`iconbtn ${voiceActive ? "voice-active" : ""}`}
+              className={`iconbtn ${voiceActive ? "is-on" : ""}`}
               onClick={toggleVoiceCall}
               title={voiceActive ? "Colgar llamada" : "Iniciar llamada de voz"}
               disabled={!peerReady}
             >
-              {voiceActive ? "📵" : "📞"}
+              <Icon name={voiceActive ? "phone-off" : "phone"} />
             </button>
             <button
               className="iconbtn"
@@ -1336,15 +1508,24 @@ export default function App() {
               title="Reproducir YouTube juntos"
               disabled={!peerReady}
             >
-              🎵
+              <Icon name="music" />
             </button>
             {voiceActive && (
               <button
-                className={`iconbtn ${micMuted ? "mic-muted" : ""}`}
+                className={`iconbtn ${micMuted ? "is-on" : ""}`}
                 onClick={toggleMic}
                 title={micMuted ? "Activar micrófono" : "Silenciar micrófono"}
               >
-                {micMuted ? "🔇" : "🎙"}
+                <Icon name={micMuted ? "mic-off" : "mic"} />
+              </button>
+            )}
+            {voiceActive && (
+              <button
+                className={`iconbtn ${cameraActive ? "is-on" : ""}`}
+                onClick={toggleCamera}
+                title={cameraActive ? "Apagar cámara" : "Encender cámara"}
+              >
+                <Icon name={cameraActive ? "cam-off" : "cam"} />
               </button>
             )}
             <div className="composer-input-wrap">
@@ -1380,7 +1561,9 @@ export default function App() {
                 disabled={!peerReady}
               />
             </div>
-            <button className="iconbtn send" onClick={sendText} title="Enviar (Enter)" disabled={!peerReady}>↑</button>
+            <button className="iconbtn send" onClick={sendText} title="Enviar (Enter)" disabled={!peerReady}>
+              <Icon name="send" />
+            </button>
           </footer>
         </>
       ) : (
@@ -1622,7 +1805,9 @@ export default function App() {
                 ))}
               </div>
               <div className="fc-composer">
-                <button className="iconbtn" onClick={attachImage} title="Adjuntar imagen" disabled={!peerReady}>🖼</button>
+                <button className="iconbtn" onClick={attachImage} title="Adjuntar imagen" disabled={!peerReady}>
+                  <Icon name="image" />
+                </button>
                 <textarea
                   className="input"
                   placeholder={peerReady ? "Mensaje…" : "Conectando…"}
@@ -1635,7 +1820,9 @@ export default function App() {
                   rows={1}
                   disabled={!peerReady}
                 />
-                <button className="iconbtn send" onClick={sendText} disabled={!peerReady} title="Enviar (Enter)">↑</button>
+                <button className="iconbtn send" onClick={sendText} disabled={!peerReady} title="Enviar (Enter)">
+                  <Icon name="send" />
+                </button>
               </div>
             </div>
           )}
@@ -1651,6 +1838,43 @@ export default function App() {
         <AudioPlayer key={pid} stream={stream} />
       ))}
 
+      {/* Floating call panel — local cam + remote cams during a voice call */}
+      {voiceActive && (cameraActive || remoteCameraStreams.size > 0) && (
+        <div className="call-tiles">
+          {localCameraStream && (
+            <div className="call-tile call-tile-self">
+              <LocalVideoPreview stream={localCameraStream} />
+              <span className="call-tile-label">Tú</span>
+            </div>
+          )}
+          {[...remoteCameraStreams.entries()].map(([pid, stream]) => {
+            const name =
+              rooms.find((r) => r.memberPeerIds.includes(pid))?.memberNames[pid]
+              ?? pid.slice(0, 8);
+            return (
+              <div className="call-tile" key={pid}>
+                <VideoTile stream={stream} />
+                <span className="call-tile-label">{name}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Incoming call modal */}
+      {incomingCall && (
+        <div className="modal-backdrop" onClick={rejectIncomingCall}>
+          <div className="modal call-incoming" onClick={(e) => e.stopPropagation()}>
+            <div className="call-incoming-icon">📞</div>
+            <div className="call-incoming-title"><b>{incomingCallName}</b> te está llamando</div>
+            <div className="modal-actions">
+              <button className="secondary call-reject" onClick={rejectIncomingCall}>Rechazar</button>
+              <button className="primary call-accept" onClick={acceptIncomingCall}>Aceptar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {musicPickerOpen && (
         <MusicPicker
           onClose={() => setMusicPickerOpen(false)}
@@ -1665,6 +1889,17 @@ export default function App() {
           onClose={closeMusic}
           onBroadcastState={broadcastMusicState}
         />
+      )}
+
+      {msgNotif && msgNotif.roomId !== activeId && (
+        <div
+          className="msg-notif"
+          onClick={() => { setActiveId(msgNotif.roomId); setMsgNotif(null); }}
+          title="Click para ver el chat"
+        >
+          <span className="msg-notif-author">{msgNotif.author}</span>
+          <span className="msg-notif-preview">{msgNotif.preview}</span>
+        </div>
       )}
 
       {toast && <div className="toast">{toast}</div>}
@@ -2043,6 +2278,23 @@ function AudioPlayer({ stream }: { stream: MediaStream }) {
     if (ref.current) ref.current.srcObject = stream;
   }, [stream]);
   return <audio ref={ref} autoPlay style={{ display: "none" }} />;
+}
+
+function VideoTile({ stream }: { stream: MediaStream }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.srcObject = stream;
+  }, [stream]);
+  return <video ref={ref} autoPlay playsInline muted />;
+}
+
+function LocalVideoPreview({ stream }: { stream: MediaStream }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.srcObject = stream;
+  }, [stream]);
+  // Mirror like a typical webcam preview
+  return <video ref={ref} autoPlay playsInline muted style={{ transform: "scaleX(-1)" }} />;
 }
 
 function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
