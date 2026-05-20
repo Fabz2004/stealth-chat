@@ -256,11 +256,10 @@ input, textarea {
 
 .iconbtn:hover { background: rgba(255, 255, 255, 0.06); opacity: 1; }
 .iconbtn:disabled { opacity: 0.35; cursor: not-allowed; }
-.iconbtn.send { background: var(--accent); border-color: var(--accent); color: white; font-weight: bold; }
-.iconbtn.send:hover { filter: brightness(1.15); }
-.iconbtn.send:disabled { background: var(--accent); opacity: 0.4; }
-.iconbtn.sharing { background: #d9534f; border-color: #d9534f; color: white; }
-.iconbtn.sharing:hover { filter: brightness(1.1); }
+.iconbtn.send { font-weight: bold; }
+.iconbtn.send:hover { background: rgba(255, 255, 255, 0.08); }
+.iconbtn.sharing { background: rgba(217, 83, 79, 0.18); border-color: rgba(217, 83, 79, 0.4); color: #ff8a86; }
+.iconbtn.sharing:hover { background: rgba(217, 83, 79, 0.28); }
 
 /* ===== Split layout when remote screen share is active ===== */
 .split-content {

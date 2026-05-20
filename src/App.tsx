@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { getVersion } from "@tauri-apps/api/app";
 import { PeerManager, WireMsg } from "./peer";
 
 type RoomKind = "dm" | "group";
@@ -125,6 +126,8 @@ export default function App() {
   const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body?: string } | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total?: number } | null>(null);
+  const [appVersion, setAppVersion] = useState<string>("");
+  const [checkStatus, setCheckStatus] = useState<"idle" | "checking" | "uptodate" | "found" | "error">("idle");
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -207,6 +210,11 @@ export default function App() {
     localStorage.setItem("sc.splitRatio", String(splitRatio));
   }, [splitRatio]);
 
+  // Get app version (for display in settings)
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => {});
+  }, []);
+
   // Check for updates on startup
   useEffect(() => {
     let cancelled = false;
@@ -224,6 +232,24 @@ export default function App() {
     })();
     return () => { cancelled = true; };
   }, []);
+
+  async function manualCheck() {
+    setCheckStatus("checking");
+    try {
+      const update = await check();
+      if (update) {
+        setUpdateAvailable({ version: update.version, body: update.body });
+        setCheckStatus("found");
+      } else {
+        setCheckStatus("uptodate");
+        setTimeout(() => setCheckStatus((s) => (s === "uptodate" ? "idle" : s)), 4000);
+      }
+    } catch (e) {
+      console.error("[updater] manual check failed", e);
+      setCheckStatus("error");
+      setTimeout(() => setCheckStatus((s) => (s === "error" ? "idle" : s)), 4000);
+    }
+  }
 
   async function installUpdate() {
     setUpdating(true);
@@ -1023,6 +1049,30 @@ export default function App() {
 
           <div className="hint">
             <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd> oculta/muestra (también apaga click-a-través)
+          </div>
+
+          <hr />
+          <div className="section-title">Actualizaciones</div>
+          <div className="row">
+            <span>Versión actual</span>
+            <code className="row-code">v{appVersion || "…"}</code>
+          </div>
+          <div className="row">
+            <span>
+              {checkStatus === "checking" && "Buscando…"}
+              {checkStatus === "uptodate" && "✓ Estás al día"}
+              {checkStatus === "found" && "Nueva versión disponible ↓"}
+              {checkStatus === "error" && "Error al buscar"}
+              {checkStatus === "idle" && "Buscar nueva versión"}
+            </span>
+            <button
+              className="primary"
+              style={{ padding: "4px 10px", fontSize: 11 }}
+              onClick={manualCheck}
+              disabled={checkStatus === "checking" || updating}
+            >
+              {checkStatus === "checking" ? "…" : "Actualizar"}
+            </button>
           </div>
         </div>
       )}
