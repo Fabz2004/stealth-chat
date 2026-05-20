@@ -1,6 +1,6 @@
 [package]
 name = "stealth-chat"
-version = "0.1.19"
+version = "0.1.20"
 description = "Lightweight stealth chat overlay"
 authors = ["bobby"]
 edition = "2021"

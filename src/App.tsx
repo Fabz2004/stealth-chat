@@ -1639,7 +1639,15 @@ export default function App() {
     // Hide (not minimize) so Ctrl+Shift+H is the consistent path to bring it back.
     await getCurrentWebviewWindow().hide();
   }
-  async function closeWindow() { await getCurrentWebviewWindow().close(); }
+  async function closeWindow() {
+    // Close the mascot first so the whole app actually quits (otherwise the
+    // mascot window keeps the process alive after the main window is gone).
+    try {
+      const m = await WebviewWindow.getByLabel("mascot");
+      if (m) await m.close();
+    } catch { /* ignore */ }
+    await getCurrentWebviewWindow().close();
+  }
 
   // Custom tab drag: lets the user drag the window from any tab (they're <button>s
   // so Tauri's data-tauri-drag-region doesn't pick them up). Distinguishes click

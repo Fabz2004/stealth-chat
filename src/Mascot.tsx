@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen, emit } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 type NotifPayload = { author: string; preview: string; roomId?: string };
 
@@ -52,21 +53,38 @@ export default function Mascot() {
     return () => clearTimeout(t);
   }, [bubble]);
 
-  const downAt = useRef(0);
-  const downPos = useRef({ x: 0, y: 0 });
+  // Custom click-vs-drag detection. We do NOT use data-tauri-drag-region because
+  // it absorbs the mouseup event, which prevents click from firing reliably.
+  // Threshold of 5px of movement = drag, otherwise = click.
   function onMouseDown(e: React.MouseEvent) {
-    downAt.current = Date.now();
-    downPos.current = { x: e.clientX, y: e.clientY };
-  }
-  function onMouseUp(e: React.MouseEvent) {
-    const dur = Date.now() - downAt.current;
-    const dx = e.clientX - downPos.current.x;
-    const dy = e.clientY - downPos.current.y;
-    const moved = Math.hypot(dx, dy);
-    // Quick click without much movement = open chat
-    if (dur < 350 && moved < 6 && lastRoomId.current) {
-      emit("mascot:open-chat", { roomId: lastRoomId.current }).catch(() => {});
+    if (e.button !== 0) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startedAt = Date.now();
+    let dragging = false;
+
+    function onMove(ev: MouseEvent) {
+      if (dragging) return;
+      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) > 5) {
+        dragging = true;
+        getCurrentWebviewWindow().startDragging().catch(() => {});
+        cleanup();
+      }
     }
+    function onUp() {
+      cleanup();
+      if (!dragging && Date.now() - startedAt < 400) {
+        // It's a click. Always bring the main window forward; route to the chat
+        // that triggered the last notification when we have one.
+        emit("mascot:open-chat", { roomId: lastRoomId.current ?? undefined }).catch(() => {});
+      }
+    }
+    function cleanup() {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
   }
 
   const dark = darken(color, 0.65);
@@ -76,14 +94,13 @@ export default function Mascot() {
       className={`mascot-root ${active ? "active" : "peeking"}`}
       style={{ opacity }}
       onMouseDown={onMouseDown}
-      onMouseUp={onMouseUp}
     >
       {bubble && active && (
         <div className="speech-bubble">
           <span>👋 {bubble.author}</span>
         </div>
       )}
-      <div className="mascot-body" data-tauri-drag-region>
+      <div className="mascot-body">
         {active ? <FullMascot color={color} dark={dark} /> : <PeekingMascot color={color} dark={dark} />}
       </div>
     </div>
@@ -92,19 +109,19 @@ export default function Mascot() {
 
 function FullMascot({ color, dark }: { color: string; dark: string }) {
   return (
-    <svg viewBox="0 0 100 130" width="86" height="110" style={{ pointerEvents: "none" }}>
+    <svg viewBox="0 0 100 122" width="86" height="105" style={{ pointerEvents: "none" }}>
       {/* shadow */}
-      <ellipse cx="50" cy="122" rx="24" ry="3" fill="rgba(0,0,0,0.35)" />
-      {/* legs - animated wobble */}
+      <ellipse cx="50" cy="116" rx="22" ry="3" fill="rgba(0,0,0,0.35)" />
+      {/* legs (attached close to body, centered) */}
       <g className="mascot-legs">
-        <ellipse cx="40" cy="108" rx="5" ry="7" fill={dark} />
-        <ellipse cx="60" cy="108" rx="5" ry="7" fill={dark} />
-        {/* feet */}
-        <ellipse cx="40" cy="116" rx="7" ry="3" fill={darken(dark, 0.75)} />
-        <ellipse cx="60" cy="116" rx="7" ry="3" fill={darken(dark, 0.75)} />
+        <ellipse cx="44" cy="100" rx="5" ry="8" fill={dark} />
+        <ellipse cx="56" cy="100" rx="5" ry="8" fill={dark} />
+        {/* feet — wider than legs to look like little shoes */}
+        <ellipse cx="44" cy="110" rx="7" ry="3" fill={darken(dark, 0.7)} />
+        <ellipse cx="56" cy="110" rx="7" ry="3" fill={darken(dark, 0.7)} />
       </g>
-      {/* body */}
-      <ellipse cx="50" cy="82" rx="22" ry="14" fill={dark} />
+      {/* body — slightly taller and overlapping the legs to hide the seam */}
+      <ellipse cx="50" cy="84" rx="24" ry="18" fill={dark} />
       {/* head */}
       <circle cx="50" cy="45" r="30" fill={color} />
       {/* ear tufts */}

@@ -89,12 +89,23 @@ pub fn run() {
                 );
             }
 
-            // Notify frontend on focus events so it can hint stealth status
+            // Notify frontend on focus events + close the mascot when main goes away
+            // so the process actually quits instead of leaving an orphaned mascot.
             if let Some(window) = app.get_webview_window("main") {
                 let w = window.clone();
+                let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::Focused(focused) = event {
-                        let _ = w.emit("window-focus", *focused);
+                    match event {
+                        tauri::WindowEvent::Focused(focused) => {
+                            let _ = w.emit("window-focus", *focused);
+                        }
+                        tauri::WindowEvent::CloseRequested { .. }
+                        | tauri::WindowEvent::Destroyed => {
+                            if let Some(mascot) = app_handle.get_webview_window("mascot") {
+                                let _ = mascot.close();
+                            }
+                        }
+                        _ => {}
                     }
                 });
             }
