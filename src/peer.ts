@@ -14,6 +14,8 @@ export type PeerEvents = {
   onError: (err: Error) => void;
   onRemoteStream: (fromPeerId: string, stream: MediaStream) => void;
   onRemoteStreamEnded: (fromPeerId: string) => void;
+  onRemoteVoice: (fromPeerId: string, stream: MediaStream) => void;
+  onRemoteVoiceEnded: (fromPeerId: string) => void;
 };
 
 export class PeerManager {
@@ -24,6 +26,9 @@ export class PeerManager {
   private incomingCalls: Map<string, MediaConnection> = new Map();
   private outgoingCalls: Map<string, MediaConnection> = new Map();
   private localShareStream?: MediaStream;
+  // Voice call state — separate from screen share so they can run independently
+  private voiceStream?: MediaStream;
+  private voiceCalls: Map<string, MediaConnection> = new Map();
   private events: PeerEvents;
   private ready = false;
   private pendingConnects: { peerId: string; resolve: () => void; reject: (e: Error) => void }[] = [];
@@ -54,21 +59,43 @@ export class PeerManager {
     this.peer.on("connection", (conn) => this.setupConnection(conn));
 
     this.peer.on("call", (call) => {
-      // Auto-answer incoming screen share with no outbound stream (one-way watch)
-      call.answer();
-      this.incomingCalls.set(call.peer, call);
-      call.on("stream", (remoteStream) => {
-        this.events.onRemoteStream(call.peer, remoteStream);
-      });
-      call.on("close", () => {
-        this.incomingCalls.delete(call.peer);
-        this.events.onRemoteStreamEnded(call.peer);
-      });
-      call.on("error", (err) => {
-        console.error("[peer] incoming call error", err);
-        this.incomingCalls.delete(call.peer);
-        this.events.onRemoteStreamEnded(call.peer);
-      });
+      const kind: "voice" | "screen" =
+        (call.metadata && (call.metadata as { kind?: string }).kind === "voice") ? "voice" : "screen";
+
+      if (kind === "voice") {
+        // Bidirectional: answer with our voice stream so the other side hears us.
+        // If our mic isn't on yet, answer silently — they'll hear us when we toggle on.
+        call.answer(this.voiceStream);
+        this.voiceCalls.set(call.peer, call);
+        call.on("stream", (remoteStream) => {
+          this.events.onRemoteVoice(call.peer, remoteStream);
+        });
+        call.on("close", () => {
+          this.voiceCalls.delete(call.peer);
+          this.events.onRemoteVoiceEnded(call.peer);
+        });
+        call.on("error", (err) => {
+          console.error("[peer] voice call error", err);
+          this.voiceCalls.delete(call.peer);
+          this.events.onRemoteVoiceEnded(call.peer);
+        });
+      } else {
+        // Screen share: one-way watch (no outbound stream).
+        call.answer();
+        this.incomingCalls.set(call.peer, call);
+        call.on("stream", (remoteStream) => {
+          this.events.onRemoteStream(call.peer, remoteStream);
+        });
+        call.on("close", () => {
+          this.incomingCalls.delete(call.peer);
+          this.events.onRemoteStreamEnded(call.peer);
+        });
+        call.on("error", (err) => {
+          console.error("[peer] incoming call error", err);
+          this.incomingCalls.delete(call.peer);
+          this.events.onRemoteStreamEnded(call.peer);
+        });
+      }
     });
 
     this.peer.on("error", (err) => {
@@ -192,12 +219,14 @@ export class PeerManager {
 
   // ===== Screen share =====
 
-  async startScreenShare(peerIds: string[]): Promise<MediaStream> {
+  async startScreenShare(peerIds: string[], withAudio = true): Promise<MediaStream> {
     if (this.localShareStream) throw new Error("Ya estás compartiendo");
     const stream = await navigator.mediaDevices.getDisplayMedia({
-      // Let the browser pick native resolution; cap frameRate at 60 (will pick whatever your monitor supports).
+      // Let the browser pick native resolution; cap frameRate at 60.
       video: { frameRate: { ideal: 60, max: 60 } } as MediaTrackConstraints,
-      audio: false,
+      // Ask for system/tab audio. The user can decline in the picker (audio capture
+      // is only offered when sharing "Entire screen" or "Browser tab" on most platforms).
+      audio: withAudio,
     });
     this.localShareStream = stream;
 
@@ -268,8 +297,70 @@ export class PeerManager {
     return !!this.localShareStream;
   }
 
+  // ===== Voice (mic) calls =====
+
+  async startVoice(peerIds: string[]): Promise<void> {
+    if (this.voiceStream) return;
+    this.voiceStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false,
+    });
+    // Call every peer in the room with our voice stream.
+    for (const pid of peerIds) {
+      this.placeVoiceCall(pid);
+    }
+  }
+
+  /** Add a peer to the active voice call (e.g. when they connect mid-call). */
+  placeVoiceCall(peerId: string) {
+    if (!this.voiceStream) return;
+    if (this.voiceCalls.has(peerId)) return;
+    try {
+      const call = this.peer.call(peerId, this.voiceStream, { metadata: { kind: "voice" } });
+      this.voiceCalls.set(peerId, call);
+      call.on("stream", (remoteStream) => {
+        this.events.onRemoteVoice(peerId, remoteStream);
+      });
+      call.on("close", () => {
+        this.voiceCalls.delete(peerId);
+        this.events.onRemoteVoiceEnded(peerId);
+      });
+      call.on("error", (e) => {
+        console.error("[peer] outgoing voice call error", e);
+        this.voiceCalls.delete(peerId);
+      });
+    } catch (e) {
+      console.error(`[peer] failed to place voice call to ${peerId}`, e);
+    }
+  }
+
+  stopVoice() {
+    for (const call of this.voiceCalls.values()) {
+      try { call.close(); } catch { /* ignore */ }
+    }
+    this.voiceCalls.clear();
+    if (this.voiceStream) {
+      for (const t of this.voiceStream.getTracks()) {
+        try { t.stop(); } catch { /* ignore */ }
+      }
+      this.voiceStream = undefined;
+    }
+  }
+
+  isVoiceActive(): boolean {
+    return !!this.voiceStream;
+  }
+
+  setMicMuted(muted: boolean) {
+    if (!this.voiceStream) return;
+    for (const t of this.voiceStream.getAudioTracks()) {
+      t.enabled = !muted;
+    }
+  }
+
   destroy() {
     this.stopScreenShare();
+    this.stopVoice();
     try { this.peer.destroy(); } catch { /* ignore */ }
   }
 }

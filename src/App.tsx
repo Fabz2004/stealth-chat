@@ -160,6 +160,10 @@ export default function App() {
   const [immersiveChatOpen, setImmersiveChatOpen] = useState(false);
   // Image being viewed full-window in a lightbox (data URL), or null.
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  // Voice call state
+  const [voiceActive, setVoiceActive] = useState(false);
+  const [micMuted, setMicMuted] = useState(false);
+  const [remoteVoiceStreams, setRemoteVoiceStreams] = useState<Map<string, MediaStream>>(new Map());
   const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body?: string } | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total?: number } | null>(null);
@@ -225,15 +229,22 @@ export default function App() {
     };
   }, []);
 
-  // Make the OS window fullscreen while in immersive mode so the video fills the whole monitor
-  // (otherwise the shared screen is limited to whatever size the Chati window has).
+  // Make the OS window fullscreen while in immersive mode so the video fills the whole monitor.
+  // Belt-and-suspenders: setFullscreen + also fallback to manually resizing to monitor bounds
+  // in case setFullscreen has quirks with transparent/alwaysOnTop windows.
   useEffect(() => {
     const win = getCurrentWebviewWindow();
-    if (immersivePeerId) {
-      win.setFullscreen(true).catch((e) => console.warn("[fullscreen] enter failed", e));
-    } else {
-      win.setFullscreen(false).catch((e) => console.warn("[fullscreen] exit failed", e));
-    }
+    (async () => {
+      try {
+        if (immersivePeerId) {
+          await win.setFullscreen(true);
+        } else {
+          await win.setFullscreen(false);
+        }
+      } catch (e) {
+        console.warn("[fullscreen] toggle failed", e);
+      }
+    })();
   }, [immersivePeerId]);
 
   // Keyboard shortcuts for immersive mode:
@@ -535,6 +546,20 @@ export default function App() {
         });
         setImmersivePeerId((p) => (p === fromPeerId ? null : p));
       },
+      onRemoteVoice: (fromPeerId, stream) => {
+        setRemoteVoiceStreams((m) => {
+          const next = new Map(m);
+          next.set(fromPeerId, stream);
+          return next;
+        });
+      },
+      onRemoteVoiceEnded: (fromPeerId) => {
+        setRemoteVoiceStreams((m) => {
+          const next = new Map(m);
+          next.delete(fromPeerId);
+          return next;
+        });
+      },
     });
 
     peerRef.current = pm;
@@ -833,6 +858,78 @@ export default function App() {
   }
   async function closeWindow() { await getCurrentWebviewWindow().close(); }
 
+  // Custom tab drag: lets the user drag the window from any tab (they're <button>s
+  // so Tauri's data-tauri-drag-region doesn't pick them up). Distinguishes click
+  // from drag by a small movement threshold.
+  function tabDragHandler(e: React.MouseEvent) {
+    if (e.button !== 0) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let dragging = false;
+    function onMove(ev: MouseEvent) {
+      if (dragging) return;
+      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) > 6) {
+        dragging = true;
+        getCurrentWebviewWindow().startDragging().catch(() => {});
+        cleanup();
+      }
+    }
+    function onUp() { cleanup(); }
+    function cleanup() {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  async function toggleVoiceCall() {
+    if (!activeRoom || !peerRef.current) return;
+    const pm = peerRef.current;
+    if (pm.isVoiceActive()) {
+      pm.stopVoice();
+      setVoiceActive(false);
+      setMicMuted(false);
+      showToast("Llamada finalizada");
+      return;
+    }
+    const targets = activeRoom.memberPeerIds.filter((pid) => pm.isConnected(pid));
+    if (targets.length === 0) {
+      showToast("Nadie conectado para llamar");
+      return;
+    }
+    try {
+      await pm.startVoice(targets);
+      setVoiceActive(true);
+      showToast(`En llamada con ${targets.length}`);
+    } catch (e: any) {
+      console.error(e);
+      if (e?.name === "NotAllowedError") {
+        showToast("Permiso de micrófono denegado");
+      } else {
+        showToast(`No se pudo iniciar la llamada: ${e?.message ?? "error"}`);
+      }
+    }
+  }
+
+  function toggleMic() {
+    if (!peerRef.current) return;
+    const next = !micMuted;
+    peerRef.current.setMicMuted(next);
+    setMicMuted(next);
+    showToast(next ? "Mic silenciado" : "Mic encendido");
+  }
+
+  // When a new peer connects to a room where we're already in a voice call,
+  // automatically include them in the call.
+  useEffect(() => {
+    if (!voiceActive || !peerRef.current || !activeRoom) return;
+    const pm = peerRef.current;
+    for (const pid of activeRoom.memberPeerIds) {
+      if (pm.isConnected(pid)) pm.placeVoiceCall(pid);
+    }
+  }, [voiceActive, activeRoom, rooms]);
+
   async function toggleScreenShare() {
     if (!activeRoom || !peerRef.current) return;
     if (peerRef.current.isSharing()) {
@@ -885,9 +982,10 @@ export default function App() {
               <button
                 key={r.id}
                 className={`tab ${r.id === activeId ? "active" : ""}`}
+                onMouseDown={tabDragHandler}
                 onClick={() => setActiveId(r.id)}
                 onAuxClick={(e) => { if (e.button === 1) removeRoom(r.id); }}
-                title={`${r.kind === "group" ? "Grupo · " : ""}${st.connected}/${st.total} conectados · click medio para eliminar`}
+                title={`${r.kind === "group" ? "Grupo · " : ""}${st.connected}/${st.total} conectados · arrastra para mover ventana · click medio para eliminar`}
               >
                 <span className={`dot ${allOn ? "on" : "off"}`} />
                 <span className="tab-name">{r.name}</span>
@@ -898,6 +996,7 @@ export default function App() {
             <button
               key={`req-${peerId}`}
               className={`tab tab-request ${activeId === `req-${peerId}` ? "active" : ""}`}
+              onMouseDown={tabDragHandler}
               onClick={() => setActiveId(`req-${peerId}`)}
               title={`${name} quiere chatear (click para revisar)`}
             >
@@ -1070,11 +1169,28 @@ export default function App() {
             <button
               className={`iconbtn ${isSharing ? "sharing" : ""}`}
               onClick={toggleScreenShare}
-              title={isSharing ? "Dejar de compartir pantalla" : "Compartir pantalla"}
+              title={isSharing ? "Dejar de compartir pantalla" : "Compartir pantalla (con audio del sistema)"}
               disabled={!peerReady}
             >
               {isSharing ? "■" : "🖥"}
             </button>
+            <button
+              className={`iconbtn ${voiceActive ? "voice-active" : ""}`}
+              onClick={toggleVoiceCall}
+              title={voiceActive ? "Colgar llamada" : "Iniciar llamada de voz"}
+              disabled={!peerReady}
+            >
+              {voiceActive ? "📵" : "📞"}
+            </button>
+            {voiceActive && (
+              <button
+                className={`iconbtn ${micMuted ? "mic-muted" : ""}`}
+                onClick={toggleMic}
+                title={micMuted ? "Activar micrófono" : "Silenciar micrófono"}
+              >
+                {micMuted ? "🔇" : "🎙"}
+              </button>
+            )}
             <textarea
               ref={inputRef}
               className="input"
@@ -1351,11 +1467,13 @@ export default function App() {
       )}
 
       {lightboxImage && (
-        <div className="lightbox-backdrop" onClick={() => setLightboxImage(null)}>
-          <img className="lightbox-img" src={lightboxImage} alt="" onClick={(e) => e.stopPropagation()} />
-          <button className="lightbox-close" onClick={() => setLightboxImage(null)} title="Cerrar (Esc)">✕</button>
-        </div>
+        <Lightbox src={lightboxImage} onClose={() => setLightboxImage(null)} />
       )}
+
+      {/* Hidden audio elements for incoming voice streams — the browser auto-mixes them. */}
+      {[...remoteVoiceStreams.entries()].map(([pid, stream]) => (
+        <AudioPlayer key={pid} stream={stream} />
+      ))}
 
       {toast && <div className="toast">{toast}</div>}
 
@@ -1505,6 +1623,87 @@ function RemoteVideo({
  * aspect ratio preserved. Same technique YouTube and Instagram use to handle
  * mismatched aspect ratios without distorting the content.
  */
+function AudioPlayer({ stream }: { stream: MediaStream }) {
+  const ref = useRef<HTMLAudioElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.srcObject = stream;
+  }, [stream]);
+  return <audio ref={ref} autoPlay style={{ display: "none" }} />;
+}
+
+function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const dragStart = useRef({ mx: 0, my: 0, ox: 0, oy: 0 });
+
+  function handleWheel(e: React.WheelEvent) {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+    setZoom((z) => {
+      const next = Math.max(1, Math.min(10, z * factor));
+      if (next === 1) setOffset({ x: 0, y: 0 });
+      return next;
+    });
+  }
+
+  function handleMouseDown(e: React.MouseEvent) {
+    if (zoom <= 1) return;
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDragging(true);
+    dragStart.current = { mx: e.clientX, my: e.clientY, ox: offset.x, oy: offset.y };
+  }
+
+  useEffect(() => {
+    if (!dragging) return;
+    function onMove(ev: MouseEvent) {
+      setOffset({
+        x: dragStart.current.ox + (ev.clientX - dragStart.current.mx),
+        y: dragStart.current.oy + (ev.clientY - dragStart.current.my),
+      });
+    }
+    function onUp() { setDragging(false); }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [dragging]);
+
+  return (
+    <div className="lightbox-backdrop" onClick={onClose} onWheel={handleWheel}>
+      <img
+        className="lightbox-img"
+        src={src}
+        alt=""
+        onClick={(e) => e.stopPropagation()}
+        onMouseDown={handleMouseDown}
+        style={{
+          transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+          cursor: zoom > 1 ? (dragging ? "grabbing" : "grab") : "default",
+          transition: dragging ? "none" : "transform 0.05s linear",
+        }}
+        draggable={false}
+      />
+      {zoom > 1 && (
+        <button
+          className="zoom-reset"
+          onClick={(e) => { e.stopPropagation(); setZoom(1); setOffset({ x: 0, y: 0 }); }}
+        >
+          {Math.round(zoom * 100)}% · reset
+        </button>
+      )}
+      <button className="lightbox-close" onClick={onClose} title="Cerrar (Esc)">✕</button>
+      <div className="lightbox-hint">Ctrl+rueda: zoom · arrastra: mover</div>
+    </div>
+  );
+}
+
 function ImmersiveVideo({ stream }: { stream: MediaStream }) {
   const bgRef = useRef<HTMLVideoElement>(null);
   const fgRef = useRef<HTMLVideoElement>(null);
