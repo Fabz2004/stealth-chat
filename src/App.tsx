@@ -7,7 +7,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
-import { PeerManager, WireMsg } from "./peer";
+import { PeerManager, WireMsg, ReplyRef } from "./peer";
 
 type RoomKind = "dm" | "group";
 
@@ -18,6 +18,7 @@ type Msg = {
   text?: string;
   imageDataUrl?: string;
   ts: number;
+  replyTo?: ReplyRef;
 };
 
 type Room = {
@@ -164,6 +165,15 @@ export default function App() {
   const [voiceActive, setVoiceActive] = useState(false);
   const [micMuted, setMicMuted] = useState(false);
   const [remoteVoiceStreams, setRemoteVoiceStreams] = useState<Map<string, MediaStream>>(new Map());
+  // Reply state — when set, the next outgoing message will quote this one.
+  const [replyingTo, setReplyingTo] = useState<ReplyRef | null>(null);
+  // @ mention autocomplete state
+  const [mentionState, setMentionState] = useState<{ query: string; atIndex: number } | null>(null);
+  // Shared YouTube player state (only one active per room)
+  const [musicVideoId, setMusicVideoId] = useState<string | null>(null);
+  const [musicOpen, setMusicOpen] = useState(false);
+  const [musicHostId, setMusicHostId] = useState<string | null>(null);
+  const [musicPickerOpen, setMusicPickerOpen] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body?: string } | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total?: number } | null>(null);
@@ -454,6 +464,24 @@ export default function App() {
         return;
       }
 
+      if (msg.type === "music-open") {
+        setMusicVideoId(msg.videoId);
+        setMusicHostId(fromPeerId);
+        setMusicOpen(true);
+        return;
+      }
+      if (msg.type === "music-close") {
+        setMusicVideoId(null);
+        setMusicHostId(null);
+        setMusicOpen(false);
+        return;
+      }
+      if (msg.type === "music-state") {
+        // Forward to the player via a custom DOM event so the YT player can react.
+        window.dispatchEvent(new CustomEvent("yt-sync-state", { detail: msg }));
+        return;
+      }
+
       if (msg.type === "text" || msg.type === "image") {
         // Route to room: group msg goes to msg.toGroup, DM goes to room with that peer
         const targetRoom = msg.toGroup
@@ -472,6 +500,7 @@ export default function App() {
           text: msg.type === "text" ? msg.text : undefined,
           imageDataUrl: msg.type === "image" ? msg.imageDataUrl : undefined,
           ts: msg.ts,
+          replyTo: msg.replyTo,
         };
 
         updateRoom(targetRoom.id, (r) => ({ ...r, messages: [...r.messages, newMsg] }));
@@ -621,7 +650,8 @@ export default function App() {
 
     const msgId = uid();
     const ts = Date.now();
-    const localMsg: Msg = { id: msgId, author: "me", text, ts };
+    const replyRef = replyingTo ?? undefined;
+    const localMsg: Msg = { id: msgId, author: "me", text, ts, replyTo: replyRef };
     updateRoom(activeRoom.id, (r) => ({ ...r, messages: [...r.messages, localMsg] }));
 
     const wire: WireMsg = {
@@ -632,6 +662,7 @@ export default function App() {
       text,
       ts,
       toGroup: activeRoom.kind === "group" ? activeRoom.id : undefined,
+      replyTo: replyRef,
     };
 
     if (activeRoom.kind === "dm") {
@@ -645,16 +676,124 @@ export default function App() {
     }
 
     setDraft("");
+    setReplyingTo(null);
+    setMentionState(null);
     inputRef.current?.focus();
+  }
+
+  function startReply(m: Msg) {
+    if (!activeRoom) return;
+    const authorName =
+      m.author === "me"
+        ? settings.myName
+        : (m.authorName ?? activeRoom.memberNames[m.author as string] ?? "?");
+    let snippet = (m.text ?? (m.imageDataUrl ? "🖼 imagen" : "")).trim();
+    if (snippet.length > 80) snippet = snippet.slice(0, 80) + "…";
+    setReplyingTo({ msgId: m.id, authorName, snippet });
+    inputRef.current?.focus();
+  }
+
+  function handleComposerChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+    const value = e.target.value;
+    setDraft(value);
+    // Detect @ at caret to trigger mention autocomplete (groups only)
+    if (activeRoom?.kind === "group") {
+      const caret = e.target.selectionStart ?? value.length;
+      const before = value.slice(0, caret);
+      const atIdx = before.lastIndexOf("@");
+      if (
+        atIdx >= 0 &&
+        (atIdx === 0 || /\s/.test(before[atIdx - 1])) &&
+        !/\s/.test(before.slice(atIdx + 1))
+      ) {
+        setMentionState({ query: before.slice(atIdx + 1).toLowerCase(), atIndex: atIdx });
+        return;
+      }
+    }
+    setMentionState(null);
+  }
+
+  function insertMention(name: string) {
+    if (!mentionState) return;
+    const before = draft.slice(0, mentionState.atIndex);
+    const afterStart = mentionState.atIndex + 1 + mentionState.query.length;
+    const after = draft.slice(afterStart);
+    const safe = name.replace(/\s+/g, "_");
+    const next = `${before}@${safe} ${after}`;
+    setDraft(next);
+    setMentionState(null);
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (el) {
+        const pos = before.length + safe.length + 2;
+        el.focus();
+        el.setSelectionRange(pos, pos);
+      }
+    });
+  }
+
+  function openMusic(videoId: string) {
+    if (!activeRoom || !peerRef.current) return;
+    setMusicVideoId(videoId);
+    setMusicHostId(peerRef.current.myId);
+    setMusicOpen(true);
+    const wire: WireMsg = {
+      type: "music-open",
+      videoId,
+      toGroup: activeRoom.kind === "group" ? activeRoom.id : undefined,
+      ts: Date.now(),
+    };
+    if (activeRoom.kind === "dm") {
+      const target = activeRoom.memberPeerIds[0];
+      if (target) peerRef.current.send(target, wire);
+    } else {
+      for (const pid of activeRoom.memberPeerIds) peerRef.current.send(pid, wire);
+    }
+  }
+
+  function closeMusic() {
+    if (!activeRoom || !peerRef.current) return;
+    setMusicVideoId(null);
+    setMusicHostId(null);
+    setMusicOpen(false);
+    const wire: WireMsg = {
+      type: "music-close",
+      toGroup: activeRoom.kind === "group" ? activeRoom.id : undefined,
+      ts: Date.now(),
+    };
+    if (activeRoom.kind === "dm") {
+      const target = activeRoom.memberPeerIds[0];
+      if (target) peerRef.current.send(target, wire);
+    } else {
+      for (const pid of activeRoom.memberPeerIds) peerRef.current.send(pid, wire);
+    }
+  }
+
+  function broadcastMusicState(playing: boolean, positionSec: number) {
+    if (!activeRoom || !peerRef.current) return;
+    const wire: WireMsg = {
+      type: "music-state",
+      playing,
+      positionSec,
+      ts: Date.now(),
+      toGroup: activeRoom.kind === "group" ? activeRoom.id : undefined,
+    };
+    if (activeRoom.kind === "dm") {
+      const target = activeRoom.memberPeerIds[0];
+      if (target) peerRef.current.send(target, wire);
+    } else {
+      for (const pid of activeRoom.memberPeerIds) peerRef.current.send(pid, wire);
+    }
   }
 
   function sendImageDataUrl(dataUrl: string) {
     if (!activeRoom || !peerRef.current) return;
     const msgId = uid();
     const ts = Date.now();
+    const replyRef = replyingTo ?? undefined;
     updateRoom(activeRoom.id, (r) => ({
       ...r,
-      messages: [...r.messages, { id: msgId, author: "me", imageDataUrl: dataUrl, ts }],
+      messages: [...r.messages, { id: msgId, author: "me", imageDataUrl: dataUrl, ts, replyTo: replyRef }],
     }));
     const wire: WireMsg = {
       type: "image",
@@ -664,6 +803,7 @@ export default function App() {
       imageDataUrl: dataUrl,
       ts,
       toGroup: activeRoom.kind === "group" ? activeRoom.id : undefined,
+      replyTo: replyRef,
     };
     if (activeRoom.kind === "dm") {
       const target = activeRoom.memberPeerIds[0];
@@ -671,6 +811,7 @@ export default function App() {
     } else {
       for (const pid of activeRoom.memberPeerIds) peerRef.current.send(pid, wire);
     }
+    setReplyingTo(null);
   }
 
   async function attachImage() {
@@ -1114,10 +1255,17 @@ export default function App() {
                 )}
                 {activeRoom.messages.map((m) => (
                   <div key={m.id} className={`msg ${m.author === "me" ? "mine" : "theirs"}`}>
+                    <button className="msg-reply-btn" title="Responder" onClick={() => startReply(m)}>↩</button>
+                    {m.replyTo && (
+                      <div className="quoted">
+                        <span className="quoted-author">{m.replyTo.authorName}</span>
+                        <span className="quoted-snippet">{m.replyTo.snippet}</span>
+                      </div>
+                    )}
                     {m.author !== "me" && activeRoom.kind === "group" && (
                       <span className="msg-author">{m.authorName ?? activeRoom.memberNames[m.author as string] ?? "?"}</span>
                     )}
-                    {m.text && <span className="msg-text">{m.text}</span>}
+                    {m.text && <MessageText text={m.text} myName={settings.myName} />}
                     {m.imageDataUrl && <img className="msg-img" src={m.imageDataUrl} alt="imagen" onClick={() => setLightboxImage(m.imageDataUrl!)} title="Click para ver más grande" />}
                     <span className="msg-time">
                       {new Date(m.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -1182,6 +1330,14 @@ export default function App() {
             >
               {voiceActive ? "📵" : "📞"}
             </button>
+            <button
+              className="iconbtn"
+              onClick={() => setMusicPickerOpen(true)}
+              title="Reproducir YouTube juntos"
+              disabled={!peerReady}
+            >
+              🎵
+            </button>
             {voiceActive && (
               <button
                 className={`iconbtn ${micMuted ? "mic-muted" : ""}`}
@@ -1191,19 +1347,39 @@ export default function App() {
                 {micMuted ? "🔇" : "🎙"}
               </button>
             )}
-            <textarea
-              ref={inputRef}
-              className="input"
-              placeholder={peerReady ? "Mensaje (Ctrl+V pega imagen)…" : "Conectando…"}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onPaste={handlePaste}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendText(); }
-              }}
-              rows={1}
-              disabled={!peerReady}
-            />
+            <div className="composer-input-wrap">
+              {replyingTo && (
+                <div className="reply-preview">
+                  <span className="reply-bar" />
+                  <div className="reply-body">
+                    <span className="reply-author">↩ Respondiendo a {replyingTo.authorName}</span>
+                    <span className="reply-snippet">{replyingTo.snippet}</span>
+                  </div>
+                  <button className="reply-cancel" onClick={() => setReplyingTo(null)} title="Cancelar respuesta">✕</button>
+                </div>
+              )}
+              {mentionState && activeRoom?.kind === "group" && (
+                <MentionDropdown
+                  query={mentionState.query}
+                  candidates={Object.values(activeRoom.memberNames)}
+                  onPick={insertMention}
+                />
+              )}
+              <textarea
+                ref={inputRef}
+                className="input"
+                placeholder={peerReady ? (activeRoom?.kind === "group" ? "Mensaje (@ para mencionar)…" : "Mensaje (Ctrl+V pega imagen)…") : "Conectando…"}
+                value={draft}
+                onChange={handleComposerChange}
+                onPaste={handlePaste}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape" && replyingTo) { e.preventDefault(); setReplyingTo(null); return; }
+                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendText(); }
+                }}
+                rows={1}
+                disabled={!peerReady}
+              />
+            </div>
             <button className="iconbtn send" onClick={sendText} title="Enviar (Enter)" disabled={!peerReady}>↑</button>
           </footer>
         </>
@@ -1475,6 +1651,22 @@ export default function App() {
         <AudioPlayer key={pid} stream={stream} />
       ))}
 
+      {musicPickerOpen && (
+        <MusicPicker
+          onClose={() => setMusicPickerOpen(false)}
+          onPick={(vid) => { setMusicPickerOpen(false); openMusic(vid); }}
+        />
+      )}
+
+      {musicOpen && musicVideoId && activeRoom && (
+        <YouTubePlayer
+          videoId={musicVideoId}
+          isHost={musicHostId === myPeerId}
+          onClose={closeMusic}
+          onBroadcastState={broadcastMusicState}
+        />
+      )}
+
       {toast && <div className="toast">{toast}</div>}
 
       {updateAvailable && !updating && (
@@ -1623,6 +1815,228 @@ function RemoteVideo({
  * aspect ratio preserved. Same technique YouTube and Instagram use to handle
  * mismatched aspect ratios without distorting the content.
  */
+// Renders text with @mentions highlighted. A mention pointing at the local user
+// is styled even more prominently.
+function MessageText({ text, myName }: { text: string; myName: string }) {
+  const mySafe = myName.replace(/\s+/g, "_").toLowerCase();
+  const parts = text.split(/(@\w+)/g);
+  return (
+    <span className="msg-text">
+      {parts.map((part, i) => {
+        if (part.startsWith("@") && part.length > 1) {
+          const target = part.slice(1).toLowerCase();
+          const isMe = target === mySafe;
+          return (
+            <span key={i} className={`mention ${isMe ? "mention-me" : ""}`}>
+              {part}
+            </span>
+          );
+        }
+        return <span key={i}>{part}</span>;
+      })}
+    </span>
+  );
+}
+
+function MentionDropdown({
+  query,
+  candidates,
+  onPick,
+}: {
+  query: string;
+  candidates: string[];
+  onPick: (name: string) => void;
+}) {
+  const filtered = candidates
+    .filter((c) => c && c.toLowerCase().includes(query))
+    .slice(0, 5);
+  if (filtered.length === 0) return null;
+  return (
+    <div className="mention-dropdown">
+      {filtered.map((name) => (
+        <button key={name} className="mention-item" onMouseDown={(e) => { e.preventDefault(); onPick(name); }}>
+          @{name}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function MusicPicker({ onClose, onPick }: { onClose: () => void; onPick: (videoId: string) => void }) {
+  const [url, setUrl] = useState("");
+  function submit() {
+    const id = parseYouTubeId(url);
+    if (!id) return;
+    onPick(id);
+  }
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <span>Escuchar/ver YouTube juntos</span>
+          <button className="winbtn" onClick={onClose}>×</button>
+        </div>
+        <label className="modal-row">
+          <span>Pega un link de YouTube</span>
+          <input
+            autoFocus
+            type="text"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://www.youtube.com/watch?v=..."
+            onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+          />
+        </label>
+        <div className="modal-actions">
+          <button className="secondary" onClick={onClose}>Cancelar</button>
+          <button className="primary" onClick={submit} disabled={!parseYouTubeId(url)}>
+            Reproducir para todos
+          </button>
+        </div>
+        <div className="hint">
+          Todos en este chat verán el video y las acciones del que lo abrió (play/pause) se replican.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function parseYouTubeId(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  // Direct 11-char ID
+  if (/^[A-Za-z0-9_-]{11}$/.test(trimmed)) return trimmed;
+  try {
+    const u = new URL(trimmed);
+    if (u.hostname.includes("youtu.be")) {
+      const id = u.pathname.replace(/^\//, "").slice(0, 11);
+      if (/^[A-Za-z0-9_-]{11}$/.test(id)) return id;
+    }
+    if (u.hostname.includes("youtube.com")) {
+      const v = u.searchParams.get("v");
+      if (v && /^[A-Za-z0-9_-]{11}$/.test(v)) return v;
+      // /embed/ID or /shorts/ID
+      const m = u.pathname.match(/\/(embed|shorts|live)\/([A-Za-z0-9_-]{11})/);
+      if (m) return m[2];
+    }
+  } catch {
+    // not a URL
+  }
+  return null;
+}
+
+// Globally load the YouTube IFrame API once. Returns a promise resolving to YT global.
+let ytApiPromise: Promise<any> | null = null;
+function loadYouTubeApi(): Promise<any> {
+  if (ytApiPromise) return ytApiPromise;
+  ytApiPromise = new Promise((resolve) => {
+    const w = window as any;
+    if (w.YT && w.YT.Player) { resolve(w.YT); return; }
+    const tag = document.createElement("script");
+    tag.src = "https://www.youtube.com/iframe_api";
+    document.head.appendChild(tag);
+    w.onYouTubeIframeAPIReady = () => resolve((window as any).YT);
+  });
+  return ytApiPromise;
+}
+
+function YouTubePlayer({
+  videoId,
+  isHost,
+  onClose,
+  onBroadcastState,
+}: {
+  videoId: string;
+  isHost: boolean;
+  onClose: () => void;
+  onBroadcastState: (playing: boolean, positionSec: number) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const playerRef = useRef<any>(null);
+  const lastBroadcast = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    let player: any = null;
+    loadYouTubeApi().then((YT) => {
+      if (cancelled || !containerRef.current) return;
+      player = new YT.Player(containerRef.current, {
+        videoId,
+        playerVars: { autoplay: 1, modestbranding: 1, rel: 0 },
+        events: {
+          onReady: () => {
+            playerRef.current = player;
+          },
+          onStateChange: (e: any) => {
+            if (!isHost) return;
+            const now = Date.now();
+            if (now - lastBroadcast.current < 250) return;
+            lastBroadcast.current = now;
+            const playing = e.data === 1; // 1 = playing
+            const pos = player.getCurrentTime?.() ?? 0;
+            // Only broadcast on play/pause edges
+            if (e.data === 1 || e.data === 2) {
+              onBroadcastState(playing, pos);
+            }
+          },
+        },
+      });
+    });
+    return () => {
+      cancelled = true;
+      try { playerRef.current?.destroy?.(); } catch { /* ignore */ }
+    };
+  }, [videoId]);
+
+  // Listen for sync messages from the host (when we're not host).
+  useEffect(() => {
+    if (isHost) return;
+    function onSync(e: Event) {
+      const detail = (e as CustomEvent).detail as { playing: boolean; positionSec: number };
+      const p = playerRef.current;
+      if (!p) return;
+      try {
+        const cur = p.getCurrentTime?.() ?? 0;
+        if (Math.abs(cur - detail.positionSec) > 1.5) {
+          p.seekTo(detail.positionSec, true);
+        }
+        if (detail.playing) p.playVideo();
+        else p.pauseVideo();
+      } catch { /* ignore */ }
+    }
+    window.addEventListener("yt-sync-state", onSync);
+    return () => window.removeEventListener("yt-sync-state", onSync);
+  }, [isHost]);
+
+  // Host: periodically broadcast position to keep peers in sync.
+  useEffect(() => {
+    if (!isHost) return;
+    const id = setInterval(() => {
+      const p = playerRef.current;
+      if (!p) return;
+      try {
+        const state = p.getPlayerState?.();
+        const pos = p.getCurrentTime?.() ?? 0;
+        onBroadcastState(state === 1, pos);
+      } catch { /* ignore */ }
+    }, 5000);
+    return () => clearInterval(id);
+  }, [isHost, onBroadcastState]);
+
+  return (
+    <div className="yt-overlay">
+      <div className="yt-frame-wrap">
+        <div ref={containerRef} className="yt-frame" />
+        <div className="yt-hud">
+          <span>🎵 YouTube {isHost ? "(host)" : ""}</span>
+          {isHost && <button className="rv-btn" onClick={onClose}>cerrar para todos</button>}
+          {!isHost && <button className="rv-btn" onClick={onClose}>cerrar (solo mío)</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AudioPlayer({ stream }: { stream: MediaStream }) {
   const ref = useRef<HTMLAudioElement>(null);
   useEffect(() => {

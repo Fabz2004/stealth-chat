@@ -1,10 +1,15 @@
 import Peer, { DataConnection, MediaConnection } from "peerjs";
 
+export type ReplyRef = { msgId: string; authorName: string; snippet: string };
+
 export type WireMsg =
   | { type: "hello"; name: string; peerId: string }
-  | { type: "text"; msgId: string; from: string; fromName: string; text: string; ts: number; toGroup?: string }
-  | { type: "image"; msgId: string; from: string; fromName: string; imageDataUrl: string; ts: number; toGroup?: string }
-  | { type: "members"; groupId: string; members: { peerId: string; name: string }[] };
+  | { type: "text"; msgId: string; from: string; fromName: string; text: string; ts: number; toGroup?: string; replyTo?: ReplyRef }
+  | { type: "image"; msgId: string; from: string; fromName: string; imageDataUrl: string; ts: number; toGroup?: string; replyTo?: ReplyRef }
+  | { type: "members"; groupId: string; members: { peerId: string; name: string }[] }
+  | { type: "music-open"; videoId: string; toGroup?: string; ts: number }
+  | { type: "music-state"; playing: boolean; positionSec: number; ts: number; toGroup?: string }
+  | { type: "music-close"; toGroup?: string; ts: number };
 
 export type PeerEvents = {
   onReady: (myId: string) => void;
