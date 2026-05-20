@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getCurrentWebviewWindow, WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { emitTo } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
@@ -57,6 +58,8 @@ type AppSettings = {
   toggleShortcut?: string;
   geminiApiKey?: string;
   sidebarMode?: boolean;
+  mascotEnabled?: boolean;
+  mascotOpacity?: number;
 };
 
 const DEFAULT_MINE = "#3a3d4a";
@@ -75,6 +78,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   notifSound: true,
   toggleShortcut: "Ctrl+Shift+H",
   sidebarMode: false,
+  mascotEnabled: true,
+  mascotOpacity: 1,
 };
 
 type ActivityItem = {
@@ -503,6 +508,52 @@ export default function App() {
     getVersion().then(setAppVersion).catch(() => {});
   }, []);
 
+  // Manage the floating mascot window. Spawn it when enabled, close it when not.
+  // The mascot is a second tiny always-on-top window that shows a face + speech bubble.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const want = !!settings.mascotEnabled;
+      const existing = await WebviewWindow.getByLabel("mascot");
+      if (want && !existing) {
+        try {
+          new WebviewWindow("mascot", {
+            url: "/",
+            width: 130,
+            height: 140,
+            decorations: false,
+            transparent: true,
+            alwaysOnTop: true,
+            skipTaskbar: true,
+            shadow: false,
+            resizable: false,
+            title: "Chati Mascota",
+            visible: true,
+            focus: false,
+          });
+        } catch (e) {
+          console.warn("[mascot] create failed", e);
+        }
+      } else if (!want && existing) {
+        try { await existing.close(); } catch { /* ignore */ }
+      }
+      if (cancelled) return;
+      // Push the current opacity setting too.
+      if (want) {
+        setTimeout(() => {
+          emitTo("mascot", "mascot:opacity", settings.mascotOpacity ?? 1).catch(() => {});
+        }, 400);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [settings.mascotEnabled]);
+
+  // Push opacity changes live to the mascot window.
+  useEffect(() => {
+    if (!settings.mascotEnabled) return;
+    emitTo("mascot", "mascot:opacity", settings.mascotOpacity ?? 1).catch(() => {});
+  }, [settings.mascotOpacity, settings.mascotEnabled]);
+
   // Ask the OS for permission to show notifications when the app is hidden/minimized.
   // Tauri's notification plugin handles the native toast (bottom-right on Windows).
   useEffect(() => {
@@ -786,17 +837,17 @@ export default function App() {
           roomId: targetRoom.id,
         });
 
-        // Native OS toast notification when the app isn't on top — covers
-        // hidden, minimized, and "in background" cases. Always show (even if
-        // the sound is off — the visual popup is independent of the chime).
-        if (!focusedRef.current && notifPermissionRef.current) {
-          try {
-            sendNotification({
-              title: `Chati · ${authorN}`,
-              body: previewT,
-            });
-          } catch (e) {
-            console.warn("[notif] send failed", e);
+        // Notification path: prefer the custom mascot window when enabled,
+        // fall back to the native OS toast otherwise.
+        if (!focusedRef.current) {
+          if (settingsRef.current.mascotEnabled) {
+            emitTo("mascot", "mascot:notify", { author: authorN, preview: previewT }).catch(() => {});
+          } else if (notifPermissionRef.current) {
+            try {
+              sendNotification({ title: `Chati · ${authorN}`, body: previewT });
+            } catch (e) {
+              console.warn("[notif] send failed", e);
+            }
           }
         }
 
@@ -856,8 +907,9 @@ export default function App() {
       onDisconnect: handleDisconnect,
       onMessage: handleIncoming,
       onError: (err) => {
+        // Silenced from the UI — peer connect failures, signaling hiccups, etc.
+        // are handled in the background by the auto-reconnect loop. Only log.
         console.error("[peer] error", err);
-        showToast(`Error de conexión: ${err.message}`);
       },
       onRemoteStream: (fromPeerId, stream) => {
         setRemoteStreams((m) => {
@@ -2182,6 +2234,36 @@ export default function App() {
               }}
             />
           </label>
+
+          <hr />
+          <div className="section-title">Mascota</div>
+          <label className="row toggle">
+            <span title="Personaje flotante en una esquina que te saluda con el nombre cuando llega mensaje">
+              Mostrar mascota
+            </span>
+            <input
+              type="checkbox"
+              checked={!!settings.mascotEnabled}
+              onChange={(e) => setSettings((s) => ({ ...s, mascotEnabled: e.target.checked }))}
+            />
+          </label>
+          {settings.mascotEnabled && (
+            <label className="row">
+              <span>Opacidad</span>
+              <input
+                type="range"
+                min={0.2}
+                max={1}
+                step={0.05}
+                value={settings.mascotOpacity ?? 1}
+                onChange={(e) => setSettings((s) => ({ ...s, mascotOpacity: parseFloat(e.target.value) }))}
+              />
+              <span className="row-val">{Math.round((settings.mascotOpacity ?? 1) * 100)}%</span>
+            </label>
+          )}
+          <div className="hint">
+            Arrastra la mascota a cualquier esquina de la pantalla. Reemplaza el toast de Windows.
+          </div>
 
           <hr />
           <div className="section-title">Layout</div>
