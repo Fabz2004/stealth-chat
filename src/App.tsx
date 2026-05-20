@@ -7,6 +7,11 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
+import {
+  sendNotification,
+  isPermissionGranted,
+  requestPermission,
+} from "@tauri-apps/plugin-notification";
 import { PeerManager, WireMsg, ReplyRef, IncomingVoiceCall } from "./peer";
 import { saveMessageToDb, loadMessagesFromDb, deleteRoomMessagesFromDb } from "./db";
 
@@ -498,6 +503,24 @@ export default function App() {
     getVersion().then(setAppVersion).catch(() => {});
   }, []);
 
+  // Ask the OS for permission to show notifications when the app is hidden/minimized.
+  // Tauri's notification plugin handles the native toast (bottom-right on Windows).
+  useEffect(() => {
+    (async () => {
+      try {
+        let granted = await isPermissionGranted();
+        if (!granted) {
+          const result = await requestPermission();
+          granted = result === "granted";
+        }
+        notifPermissionRef.current = granted;
+      } catch (e) {
+        console.warn("[notif] permission flow failed", e);
+      }
+    })();
+  }, []);
+  const notifPermissionRef = useRef(false);
+
   // Apply saved toggle shortcut on startup (in case user changed it from default).
   useEffect(() => {
     const sc = settings.toggleShortcut ?? "Ctrl+Shift+H";
@@ -762,6 +785,20 @@ export default function App() {
           text: `${authorN}: ${previewT}`,
           roomId: targetRoom.id,
         });
+
+        // Native OS toast notification when the app isn't on top — covers
+        // hidden, minimized, and "in background" cases. Always show (even if
+        // the sound is off — the visual popup is independent of the chime).
+        if (!focusedRef.current && notifPermissionRef.current) {
+          try {
+            sendNotification({
+              title: `Chati · ${authorN}`,
+              body: previewT,
+            });
+          } catch (e) {
+            console.warn("[notif] send failed", e);
+          }
+        }
 
         const isActiveAndFocused = activeIdRef.current === targetRoom.id && focusedRef.current;
         if (!isActiveAndFocused) {

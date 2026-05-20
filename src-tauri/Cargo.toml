@@ -1,6 +1,6 @@
 [package]
 name = "stealth-chat"
-version = "0.1.15"
+version = "0.1.16"
 description = "Lightweight stealth chat overlay"
 authors = ["bobby"]
 edition = "2021"
@@ -20,5 +20,6 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
