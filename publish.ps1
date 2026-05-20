@@ -32,7 +32,7 @@ if (-not (Test-Path $keyPath)) {
   exit 1
 }
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content $keyPath -Raw
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "fabz-stealthchat"
 
 Write-Host "==> Building (this takes a few minutes)" -ForegroundColor Cyan
 $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"

@@ -47,7 +47,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENGNjI3OERDMkQxNTZFNQpSV1RsVnRIQ2pTZjJETFovRHluV3dRV1NFU08vVVJKajNHZlVIRnFTVnhGVjludU9zUktkQUlmVwo=",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDEzOUEzQUZDMkI3QzBERUYKUldUdkRYd3IvRHFhRXlFRjZYc3J6SHNSTS9ZK0VkN3hBSHl2ZEtTZm1BdktHQU9OK20ra21INEYK",
       "endpoints": [
         "https://github.com/Fabz2004/stealth-chat/releases/latest/download/latest.json"
       ]
