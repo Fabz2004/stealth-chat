@@ -60,6 +60,7 @@ type AppSettings = {
   sidebarMode?: boolean;
   mascotEnabled?: boolean;
   mascotOpacity?: number;
+  mascotColor?: string;
 };
 
 const DEFAULT_MINE = "#3a3d4a";
@@ -80,6 +81,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   sidebarMode: false,
   mascotEnabled: true,
   mascotOpacity: 1,
+  mascotColor: "#a78bfa",
 };
 
 type ActivityItem = {
@@ -574,18 +576,31 @@ export default function App() {
     emitTo("mascot", "mascot:opacity", settings.mascotOpacity ?? 1).catch(() => {});
   }, [settings.mascotOpacity, settings.mascotEnabled]);
 
+  // Push color changes live to the mascot window.
+  useEffect(() => {
+    if (!settings.mascotEnabled) return;
+    emitTo("mascot", "mascot:color", settings.mascotColor ?? "#a78bfa").catch(() => {});
+  }, [settings.mascotColor, settings.mascotEnabled]);
+
   // Mascot click → open the chat that triggered the last notification, bring window forward.
+  // Works whether the main window is minimized, hidden (Ctrl+Shift+H), or just unfocused.
   useEffect(() => {
     const unlistenP = listen<{ roomId?: string }>("mascot:open-chat", async (e) => {
       const roomId = e.payload?.roomId;
       if (!roomId) return;
+      setActiveId(roomId);
       try {
         const win = getCurrentWebviewWindow();
-        await win.unminimize();
+        // Disable any leftover click-through so the user can interact.
+        await win.setIgnoreCursorEvents(false);
+        // Show first (covers the hidden-via-Ctrl+Shift+H case).
         await win.show();
+        // Then unminimize and focus.
+        await win.unminimize();
         await win.setFocus();
-      } catch { /* ignore */ }
-      setActiveId(roomId);
+      } catch (e) {
+        console.warn("[mascot] could not bring main window forward", e);
+      }
     });
     return () => { unlistenP.then((u) => u()); };
   }, []);
@@ -2323,18 +2338,28 @@ export default function App() {
             />
           </label>
           {settings.mascotEnabled && (
-            <label className="row">
-              <span>Opacidad</span>
-              <input
-                type="range"
-                min={0.2}
-                max={1}
-                step={0.05}
-                value={settings.mascotOpacity ?? 1}
-                onChange={(e) => setSettings((s) => ({ ...s, mascotOpacity: parseFloat(e.target.value) }))}
-              />
-              <span className="row-val">{Math.round((settings.mascotOpacity ?? 1) * 100)}%</span>
-            </label>
+            <>
+              <label className="row">
+                <span>Opacidad</span>
+                <input
+                  type="range"
+                  min={0.2}
+                  max={1}
+                  step={0.05}
+                  value={settings.mascotOpacity ?? 1}
+                  onChange={(e) => setSettings((s) => ({ ...s, mascotOpacity: parseFloat(e.target.value) }))}
+                />
+                <span className="row-val">{Math.round((settings.mascotOpacity ?? 1) * 100)}%</span>
+              </label>
+              <label className="row">
+                <span>Color</span>
+                <input
+                  type="color"
+                  value={settings.mascotColor ?? "#a78bfa"}
+                  onChange={(e) => setSettings((s) => ({ ...s, mascotColor: e.target.value }))}
+                />
+              </label>
+            </>
           )}
           <div className="hint">
             Arrastra la mascota a cualquier esquina de la pantalla. Reemplaza el toast de Windows.
