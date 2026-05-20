@@ -158,6 +158,8 @@ export default function App() {
   const [immersivePeerId, setImmersivePeerId] = useState<string | null>(null);
   // Whether the floating chat mini-panel is visible while in immersive mode.
   const [immersiveChatOpen, setImmersiveChatOpen] = useState(false);
+  // Image being viewed full-window in a lightbox (data URL), or null.
+  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body?: string } | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total?: number } | null>(null);
@@ -239,10 +241,18 @@ export default function App() {
   // - Escape        → exit immersive
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape" && immersivePeerId) {
-        e.preventDefault();
-        setImmersivePeerId(null);
-        return;
+      if (e.key === "Escape") {
+        // Lightbox takes priority — if open, close it first.
+        if (lightboxImage) {
+          e.preventDefault();
+          setLightboxImage(null);
+          return;
+        }
+        if (immersivePeerId) {
+          e.preventDefault();
+          setImmersivePeerId(null);
+          return;
+        }
       }
       if (e.ctrlKey && e.shiftKey && (e.key === "m" || e.key === "M")) {
         e.preventDefault();
@@ -261,7 +271,7 @@ export default function App() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [immersivePeerId, activeId, remoteStreams, hiddenStreamPeerIds]);
+  }, [immersivePeerId, activeId, remoteStreams, hiddenStreamPeerIds, lightboxImage]);
 
   // Split-view divider drag
   useEffect(() => {
@@ -1009,7 +1019,7 @@ export default function App() {
                       <span className="msg-author">{m.authorName ?? activeRoom.memberNames[m.author as string] ?? "?"}</span>
                     )}
                     {m.text && <span className="msg-text">{m.text}</span>}
-                    {m.imageDataUrl && <img className="msg-img" src={m.imageDataUrl} alt="imagen" />}
+                    {m.imageDataUrl && <img className="msg-img" src={m.imageDataUrl} alt="imagen" onClick={() => setLightboxImage(m.imageDataUrl!)} title="Click para ver más grande" />}
                     <span className="msg-time">
                       {new Date(m.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </span>
@@ -1315,7 +1325,7 @@ export default function App() {
                       <span className="msg-author">{m.authorName ?? activeRoom.memberNames[m.author as string] ?? "?"}</span>
                     )}
                     {m.text && <span className="msg-text">{m.text}</span>}
-                    {m.imageDataUrl && <img className="msg-img" src={m.imageDataUrl} alt="imagen" />}
+                    {m.imageDataUrl && <img className="msg-img" src={m.imageDataUrl} alt="imagen" onClick={() => setLightboxImage(m.imageDataUrl!)} title="Click para ver más grande" />}
                   </div>
                 ))}
               </div>
@@ -1337,6 +1347,13 @@ export default function App() {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {lightboxImage && (
+        <div className="lightbox-backdrop" onClick={() => setLightboxImage(null)}>
+          <img className="lightbox-img" src={lightboxImage} alt="" onClick={(e) => e.stopPropagation()} />
+          <button className="lightbox-close" onClick={() => setLightboxImage(null)} title="Cerrar (Esc)">✕</button>
         </div>
       )}
 
@@ -1390,10 +1407,6 @@ function RemoteVideo({
     }
   }, [stream]);
 
-  function fullscreen() {
-    wrapRef.current?.requestFullscreen().catch(() => {});
-  }
-
   function reset() {
     setZoom(1);
     setOffset({ x: 0, y: 0 });
@@ -1444,9 +1457,9 @@ function RemoteVideo({
       className="remote-video"
       onWheel={handleWheel}
       onMouseDown={handleMouseDown}
-      onDoubleClick={fullscreen}
+      onDoubleClick={() => onToggleImmersive?.()}
       style={{ cursor }}
-      title="Ctrl+rueda: zoom · arrastra: mover · doble click: pantalla completa"
+      title="Ctrl+rueda: zoom · arrastra: mover · doble click: pantalla completa real"
     >
       <video
         ref={videoRef}
