@@ -163,6 +163,27 @@ input, textarea {
   align-items: center;
 }
 
+.hidden-shares {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.hidden-share-btn {
+  background: rgba(243, 177, 62, 0.12);
+  color: #f3b13e;
+  border: 1px solid rgba(243, 177, 62, 0.35);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  text-align: center;
+}
+.hidden-share-btn:hover { background: rgba(243, 177, 62, 0.22); }
+
 .members { font-size: 11px; opacity: 0.75; }
 
 .invite-block {
@@ -399,15 +420,30 @@ input, textarea {
   inset: 0;
   background: #000;
   z-index: 25;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  overflow: hidden;
 }
-.immersive-overlay video {
+
+/* Background layer: same video, stretched to cover and heavily blurred.
+   Fills the empty bars when aspect ratios don't match — no harsh black borders. */
+.immersive-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: blur(48px) brightness(0.55) saturate(1.15);
+  transform: scale(1.15);  /* hide the blurred-edge transparency */
+  pointer-events: none;
+}
+
+/* Foreground: the real video, preserving aspect ratio, centered. */
+.immersive-fg {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: contain;
-  background: #000;
+  z-index: 1;
 }
 
 .immersive-hud {

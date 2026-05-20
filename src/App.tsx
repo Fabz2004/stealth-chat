@@ -223,6 +223,17 @@ export default function App() {
     };
   }, []);
 
+  // Make the OS window fullscreen while in immersive mode so the video fills the whole monitor
+  // (otherwise the shared screen is limited to whatever size the Chati window has).
+  useEffect(() => {
+    const win = getCurrentWebviewWindow();
+    if (immersivePeerId) {
+      win.setFullscreen(true).catch((e) => console.warn("[fullscreen] enter failed", e));
+    } else {
+      win.setFullscreen(false).catch((e) => console.warn("[fullscreen] exit failed", e));
+    }
+  }, [immersivePeerId]);
+
   // Keyboard shortcuts for immersive mode:
   // - Ctrl+Shift+M  → toggle immersive on the first remote stream in the active room
   // - Escape        → exit immersive
@@ -914,9 +925,33 @@ export default function App() {
             const roomStreams = [...remoteStreams.entries()].filter(
               ([pid]) => activeRoom.memberPeerIds.includes(pid) && !hiddenStreamPeerIds.has(pid),
             );
+            const hiddenInRoom = activeRoom.memberPeerIds.filter(
+              (pid) => remoteStreams.has(pid) && hiddenStreamPeerIds.has(pid),
+            );
             const hasVideo = roomStreams.length > 0;
             const messagesPane = (
               <div className="chat" ref={scrollRef}>
+                {hiddenInRoom.length > 0 && (
+                  <div className="hidden-shares">
+                    {hiddenInRoom.map((pid) => (
+                      <button
+                        key={pid}
+                        className="hidden-share-btn"
+                        onClick={() => {
+                          setHiddenStreamPeerIds((s) => {
+                            const next = new Set(s);
+                            next.delete(pid);
+                            return next;
+                          });
+                          showToast("Mostrando la pantalla otra vez");
+                        }}
+                        title="Volver a mostrar esta compartición"
+                      >
+                        🖥 {activeRoom.memberNames[pid] ?? pid.slice(0, 8)} comparte · <b>mostrar</b>
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {activeRoom.messages.length === 0 && (
                   <div className="empty-hint">
                     Sin mensajes en <b>{activeRoom.name}</b>.
@@ -1202,7 +1237,7 @@ export default function App() {
 
       {immersivePeerId && remoteStreams.has(immersivePeerId) && !hiddenStreamPeerIds.has(immersivePeerId) && (
         <div className="immersive-overlay">
-          <VideoStream stream={remoteStreams.get(immersivePeerId)!} />
+          <ImmersiveVideo stream={remoteStreams.get(immersivePeerId)!} />
 
           {/* Floating "exit" + label, dimmed by default, opaque on hover */}
           <div className="immersive-hud" onMouseDown={(e) => e.stopPropagation()}>
@@ -1414,12 +1449,25 @@ function RemoteVideo({
   );
 }
 
-function VideoStream({ stream, className }: { stream: MediaStream; className?: string }) {
-  const ref = useRef<HTMLVideoElement>(null);
+/**
+ * Dual-layer video: a blurred copy of the same stream covers the background
+ * (filling the area without black bars), and the real video sits on top with
+ * aspect ratio preserved. Same technique YouTube and Instagram use to handle
+ * mismatched aspect ratios without distorting the content.
+ */
+function ImmersiveVideo({ stream }: { stream: MediaStream }) {
+  const bgRef = useRef<HTMLVideoElement>(null);
+  const fgRef = useRef<HTMLVideoElement>(null);
   useEffect(() => {
-    if (ref.current) ref.current.srcObject = stream;
+    if (bgRef.current) bgRef.current.srcObject = stream;
+    if (fgRef.current) fgRef.current.srcObject = stream;
   }, [stream]);
-  return <video ref={ref} autoPlay playsInline muted className={className} />;
+  return (
+    <>
+      <video ref={bgRef} className="immersive-bg" autoPlay playsInline muted />
+      <video ref={fgRef} className="immersive-fg" autoPlay playsInline muted />
+    </>
+  );
 }
 
 function NameSetup({ onSubmit }: { onSubmit: (name: string) => void }) {
