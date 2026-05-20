@@ -270,11 +270,18 @@ export default function App() {
   // Floating notification (mini-message ribbon) shown for new incoming messages.
   const [msgNotif, setMsgNotif] = useState<{ author: string; preview: string; roomId: string; ts: number } | null>(null);
   const msgNotifTimer = useRef<number | null>(null);
-  // Voice call state
-  const [voiceActive, setVoiceActive] = useState(false);
+  // Voice call state. Two phases:
+  //   "calling"  → we placed a call, waiting for the other side to accept (ringing).
+  //   "in-call"  → at least one peer has answered. Timer starts from here.
+  type CallState = "idle" | "calling" | "in-call";
+  const [callState, setCallState] = useState<CallState>("idle");
+  const callStateRef = useRef<CallState>("idle");
+  useEffect(() => { callStateRef.current = callState; }, [callState]);
+  // Backwards-compat alias used throughout the rest of the code.
+  const voiceActive = callState !== "idle";
   const voiceActiveRef = useRef(false);
   useEffect(() => { voiceActiveRef.current = voiceActive; }, [voiceActive]);
-  // Track when the active call started so we can show elapsed time.
+  // Track when the call truly started (after pickup) so we can show elapsed time.
   const [callStartTs, setCallStartTs] = useState<number | null>(null);
   const [callTick, setCallTick] = useState(0);
   // Re-render every second while a call is active so the timer ticks.
@@ -582,24 +589,13 @@ export default function App() {
     emitTo("mascot", "mascot:color", settings.mascotColor ?? "#a78bfa").catch(() => {});
   }, [settings.mascotColor, settings.mascotEnabled]);
 
-  // Mascot click → open the chat that triggered the last notification, bring window forward.
-  // Works whether the main window is minimized, hidden (Ctrl+Shift+H), or just unfocused.
+  // Mascot click → Rust has already shown+focused the main window. Here we just
+  // listen for the "switch to this chat" event that Rust emits after.
   useEffect(() => {
-    const unlistenP = listen<{ roomId?: string }>("mascot:open-chat", async (e) => {
-      const roomId = e.payload?.roomId;
-      if (!roomId) return;
-      setActiveId(roomId);
-      try {
-        const win = getCurrentWebviewWindow();
-        // Disable any leftover click-through so the user can interact.
-        await win.setIgnoreCursorEvents(false);
-        // Show first (covers the hidden-via-Ctrl+Shift+H case).
-        await win.show();
-        // Then unminimize and focus.
-        await win.unminimize();
-        await win.setFocus();
-      } catch (e) {
-        console.warn("[mascot] could not bring main window forward", e);
+    const unlistenP = listen<string>("mascot:open-chat-route", (e) => {
+      const roomId = e.payload;
+      if (typeof roomId === "string" && roomId) {
+        setActiveId(roomId);
       }
     });
     return () => { unlistenP.then((u) => u()); };
@@ -1009,6 +1005,12 @@ export default function App() {
           next.set(fromPeerId, stream);
           return next;
         });
+        // First remote stream = the other side picked up. Transition from ringing
+        // to in-call and start the timer from now.
+        if (callStateRef.current === "calling") {
+          setCallState("in-call");
+          setCallStartTs(Date.now());
+        }
       },
       onRemoteVoiceEnded: (fromPeerId) => {
         setRemoteVoiceStreams((m) => {
@@ -1677,7 +1679,7 @@ export default function App() {
   function endCallLocal(reason?: string) {
     const pm = peerRef.current;
     if (pm) pm.stopVoice();
-    setVoiceActive(false);
+    setCallState("idle");
     setMicMuted(false);
     setCameraActive(false);
     setLocalCameraStream(null);
@@ -1689,7 +1691,7 @@ export default function App() {
     if (!activeRoom || !peerRef.current) return;
     const pm = peerRef.current;
     if (pm.isVoiceActive()) {
-      endCallLocal("Llamada finalizada");
+      endCallLocal(callStateRef.current === "calling" ? "Llamada cancelada" : "Llamada finalizada");
       return;
     }
     const targets = activeRoom.memberPeerIds.filter((pid) => pm.isConnected(pid));
@@ -1699,9 +1701,14 @@ export default function App() {
     }
     try {
       await pm.startVoice(targets);
-      setVoiceActive(true);
-      setCallStartTs(Date.now());
-      showToast(`Llamando a ${targets.length}…`);
+      setCallState("calling");
+      // No timer yet — we wait until someone picks up.
+      // Auto-cancel after 45s if nobody answers.
+      setTimeout(() => {
+        if (callStateRef.current === "calling") {
+          endCallLocal("Nadie contestó");
+        }
+      }, 45000);
     } catch (e: any) {
       console.error(e);
       if (e?.name === "NotAllowedError") {
@@ -1725,7 +1732,8 @@ export default function App() {
     try {
       const myStream = await peerRef.current.ensureVoiceStream();
       incomingCall.accept(myStream);
-      setVoiceActive(true);
+      setCallState("in-call");
+      setCallStartTs(Date.now());
       setIncomingCall(null);
       showToast("En llamada");
     } catch (e: any) {
@@ -2472,27 +2480,30 @@ export default function App() {
         <JoinModal onClose={() => setJoinOpen(false)} onJoin={joinByCode} />
       )}
 
-      {/* Floating call popup with timer + hangup */}
-      {voiceActive && activeRoom && (() => {
+      {/* Floating call popup. Ringing state shows "Llamando a..." with cancel.
+          Once the other side picks up it shows the timer. */}
+      {callState !== "idle" && activeRoom && (() => {
+        const isRinging = callState === "calling";
         const peersInCall = activeRoom.memberPeerIds.filter((pid) => peerRef.current?.isConnected(pid));
         const names = peersInCall.map((pid) => activeRoom.memberNames[pid] ?? pid.slice(0, 8));
         const elapsedMs = callStartTs ? Date.now() - callStartTs : 0;
         const mins = Math.floor(elapsedMs / 60000);
         const secs = Math.floor((elapsedMs % 60000) / 1000);
         const time = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-        const _ = callTick; // ensure re-render on tick
-        void _;
+        const _ = callTick; void _;
         return (
-          <div className="call-popup">
-            <span className="call-popup-dot" />
+          <div className={`call-popup ${isRinging ? "ringing" : ""}`}>
+            <span className={`call-popup-dot ${isRinging ? "ringing" : ""}`} />
             <span className="call-popup-text">
-              Llamada con <b>{names.join(", ") || "(esperando)"}</b>
+              {isRinging ? "Llamando a " : "Llamada con "}
+              <b>{names.join(", ") || "…"}</b>
+              {isRinging && <span className="ringing-dots">…</span>}
             </span>
-            <span className="call-popup-time">{time}</span>
+            {!isRinging && <span className="call-popup-time">{time}</span>}
             <button
               className="call-popup-hangup"
-              onClick={() => endCallLocal("Llamada finalizada")}
-              title="Colgar"
+              onClick={() => endCallLocal(isRinging ? "Llamada cancelada" : "Llamada finalizada")}
+              title={isRinging ? "Cancelar" : "Colgar"}
             >
               <Icon name="phone-off" size={13} />
             </button>

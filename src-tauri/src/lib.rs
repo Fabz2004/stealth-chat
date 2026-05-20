@@ -43,6 +43,23 @@ fn set_toggle_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), St
     gs.register(parsed).map_err(|e| e.to_string())
 }
 
+/// Mascot was clicked. Surface the main window and tell it which chat to open.
+/// Doing this in Rust is more reliable than emitting cross-window from JS because
+/// the main window may be hidden and the click happens in a separate webview.
+#[tauri::command]
+fn mascot_clicked(app: tauri::AppHandle, room_id: Option<String>) -> Result<(), String> {
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.set_ignore_cursor_events(false);
+        let _ = main.unminimize();
+        let _ = main.show();
+        let _ = main.set_focus();
+        if let Some(rid) = room_id {
+            let _ = main.emit("mascot:open-chat-route", rid);
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -119,6 +136,7 @@ pub fn run() {
             set_skip_taskbar,
             toggle_visibility,
             set_toggle_shortcut,
+            mascot_clicked,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1630,6 +1630,18 @@ body.mascot-window #root {
   animation: dot-pulse 1.6s ease-in-out infinite;
   flex-shrink: 0;
 }
+.call-popup-dot.ringing { background: #f3b13e; box-shadow: 0 0 6px #f3b13e; animation: dot-pulse 0.8s ease-in-out infinite; }
+.call-popup.ringing { border-color: rgba(243, 177, 62, 0.45); }
+.ringing-dots {
+  display: inline-block;
+  animation: ringing-pulse 1.2s steps(4) infinite;
+  letter-spacing: 1px;
+  margin-left: 2px;
+}
+@keyframes ringing-pulse {
+  0%   { opacity: 0.2; }
+  100% { opacity: 1; }
+}
 
 .call-popup-text b { color: #b6f0c8; }
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { listen, emit } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 type NotifPayload = { author: string; preview: string; roomId?: string };
@@ -74,9 +75,12 @@ export default function Mascot() {
     function onUp() {
       cleanup();
       if (!dragging && Date.now() - startedAt < 400) {
-        // It's a click. Always bring the main window forward; route to the chat
-        // that triggered the last notification when we have one.
-        emit("mascot:open-chat", { roomId: lastRoomId.current ?? undefined }).catch(() => {});
+        // Hand off to Rust: it shows + focuses the main window and (if we have a
+        // recent notification) emits the route event back to it. More reliable
+        // than cross-window emit from JS when the main window is hidden.
+        invoke("mascot_clicked", { roomId: lastRoomId.current ?? null }).catch((e) =>
+          console.warn("[mascot] click invoke failed", e),
+        );
       }
     }
     function cleanup() {
